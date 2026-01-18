@@ -2,6 +2,8 @@
 
 A terminal UI for browsing and selecting open PRs across the superultrainc organization.
 
+![gpr screenshot](screenshot.png)
+
 ## Install
 
 ```bash

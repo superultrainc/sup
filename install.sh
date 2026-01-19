@@ -1,10 +1,19 @@
 #!/bin/bash
 set -e
 
-# Install gpr - GitHub PR picker for superultrainc
+# Install gpr - GitHub PR picker
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
+# Prompt for dev directory
+echo "Where are your git repos located?"
+read -p "Dev directory [$HOME/Development]: " DEV_DIR
+DEV_DIR="${DEV_DIR:-$HOME/Development}"
+
+# Expand ~ if used
+DEV_DIR="${DEV_DIR/#\~/$HOME}"
+
+echo ""
 echo "Building gpr..."
 go build -o gpr .
 
@@ -20,45 +29,35 @@ case "$SHELL_NAME" in
     *)    SHELL_RC="$HOME/.${SHELL_NAME}rc" ;;
 esac
 
-# Shell function to add
-SHELL_FUNC='
+# Shell config to add
+SHELL_CONFIG="
 # gpr - GitHub PR picker
-gco() {
-    gpr
-    if [[ -f ~/.gpr-selection ]]; then
-        local repo branch
-        repo=$(cat ~/.gpr-selection | jq -r .repo)
-        branch=$(cat ~/.gpr-selection | jq -r .branch)
-        if [[ -n "$repo" && -n "$branch" ]]; then
-            local repo_path="$HOME/Development/$repo"
-            if [[ -d "$repo_path" ]]; then
-                cd "$repo_path" && git fetch origin && git checkout "$branch"
-            else
-                echo "Repo not found at $repo_path"
-            fi
-        fi
-        rm -f ~/.gpr-selection
-    fi
-}'
+export GPR_DEV_DIR=\"$DEV_DIR\"
+gpr() {
+  rm -f /tmp/gpr-selection
+  \"$INSTALL_DIR/gpr\"
+  if [[ -f /tmp/gpr-selection ]]; then
+    cd \"\$(cat /tmp/gpr-selection)\"
+    rm -f /tmp/gpr-selection
+  fi
+}"
 
 # Check if already installed
-if grep -q "gco()" "$SHELL_RC" 2>/dev/null; then
-    echo "Shell function already exists in $SHELL_RC"
+if grep -q "GPR_DEV_DIR" "$SHELL_RC" 2>/dev/null; then
+    echo "gpr config already exists in $SHELL_RC - please update manually if needed"
 else
-    echo "Adding shell function to $SHELL_RC..."
-    echo "$SHELL_FUNC" >> "$SHELL_RC"
+    echo "Adding gpr config to $SHELL_RC..."
+    echo "$SHELL_CONFIG" >> "$SHELL_RC"
 fi
 
 # Ensure install dir is in PATH
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     echo ""
-    echo "Add $INSTALL_DIR to your PATH:"
+    echo "Note: Add $INSTALL_DIR to your PATH:"
     echo "  export PATH=\"\$PATH:$INSTALL_DIR\""
 fi
 
 echo ""
-echo "Done! Restart your shell or run: source $SHELL_RC"
+echo "Done! Run: source $SHELL_RC"
 echo ""
-echo "Usage:"
-echo "  gpr  - Open PR picker"
-echo "  gco  - Pick a PR and checkout the branch"
+echo "Usage: gpr"

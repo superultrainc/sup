@@ -25,16 +25,24 @@ type PR struct {
 	Repository struct {
 		Name string `json:"name"`
 	} `json:"repository"`
-	ReviewDecision   string `json:"reviewDecision"`
-	ReviewRequests   struct {
+	ReviewDecision string `json:"reviewDecision"`
+	ReviewRequests struct {
 		TotalCount int `json:"totalCount"`
+		Nodes      []struct {
+			RequestedReviewer struct {
+				Login string `json:"login"` // For User
+				Name  string `json:"name"`  // For Team
+			} `json:"requestedReviewer"`
+		} `json:"nodes"`
 	} `json:"reviewRequests"`
-}
-
-type OutputResult struct {
-	Repo   string `json:"repo"`
-	Branch string `json:"branch"`
-	Number int    `json:"number"`
+	Reviews struct {
+		Nodes []struct {
+			Author struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			State string `json:"state"`
+		} `json:"nodes"`
+	} `json:"reviews"`
 }
 
 type model struct {
@@ -90,6 +98,9 @@ var (
 	reviewRequestedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("214"))
 
+	commentedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("117"))
+
 	openStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("39"))
 
@@ -142,7 +153,8 @@ func fetchPRs() tea.Msg {
 					author { login }
 					repository { name }
 					reviewDecision
-					reviewRequests { totalCount }
+					reviewRequests(first: 1) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
+					reviews(last: 1) { nodes { author { login } state } }
 				}
 			}
 		}
@@ -322,25 +334,42 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func getStatusBadge(pr PR) string {
 	if pr.IsDraft {
-		return draftStyle.Render("[DRAFT]")
+		return draftStyle.Render("[Draft]")
 	}
 
 	switch pr.ReviewDecision {
 	case "APPROVED":
-		return approvedStyle.Render("[APPROVED]")
+		return approvedStyle.Render("[Approved]")
 	case "CHANGES_REQUESTED":
-		return changesRequestedStyle.Render("[CHANGES]")
+		return changesRequestedStyle.Render("[Denied]")
 	case "REVIEW_REQUIRED":
-		if pr.ReviewRequests.TotalCount > 0 {
-			return reviewRequestedStyle.Render("[REVIEW]")
+		// Check if last review was a comment
+		if len(pr.Reviews.Nodes) > 0 && pr.Reviews.Nodes[0].State == "COMMENTED" {
+			return commentedStyle.Render("[Commented]")
 		}
-		return openStyle.Render("[OPEN]")
+		return reviewRequestedStyle.Render("[Review]")
 	default:
-		if pr.ReviewRequests.TotalCount > 0 {
-			return reviewRequestedStyle.Render("[REVIEW]")
-		}
-		return openStyle.Render("[OPEN]")
+		return openStyle.Render("[Open]")
 	}
+}
+
+func getReviewer(pr PR) string {
+	// First check requested reviewers
+	if len(pr.ReviewRequests.Nodes) > 0 {
+		reviewer := pr.ReviewRequests.Nodes[0].RequestedReviewer
+		name := reviewer.Login
+		if name == "" {
+			name = reviewer.Name
+		}
+		if name != "" {
+			return name
+		}
+	}
+	// Fall back to last reviewer who commented/reviewed
+	if len(pr.Reviews.Nodes) > 0 {
+		return pr.Reviews.Nodes[0].Author.Login
+	}
+	return ""
 }
 
 func getDiffStats(pr PR) string {
@@ -355,12 +384,13 @@ func (m model) View() string {
 
 	// Column widths - defined early for header
 	const (
-		colStatus = 12
-		colRepo   = 18
-		colNum    = 6
-		colTitle  = 36
-		colAuthor = 14
-		colBranch = 22
+		colStatus   = 12
+		colRepo     = 28
+		colNum      = 6
+		colTitle    = 32
+		colAuthor   = 14
+		colReviewer = 14
+		colBranch   = 20
 	)
 
 	s.WriteString("\n")
@@ -374,9 +404,9 @@ func (m model) View() string {
 	}
 
 	// Always show header
-	s.WriteString(dimStyle.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("BRANCH", colBranch) + "+/-"))
+	s.WriteString(dimStyle.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
 	s.WriteString("\n")
-	s.WriteString(dimStyle.Render("  " + strings.Repeat("─", colStatus+colRepo+colNum+colTitle+colAuthor+colBranch+10)))
+	s.WriteString(dimStyle.Render("  " + strings.Repeat("─", colStatus+colRepo+colNum+colTitle+colAuthor+colReviewer+colBranch+10)))
 	s.WriteString("\n")
 
 	if m.err != nil {
@@ -428,12 +458,13 @@ func (m model) View() string {
 			num := pad(fmt.Sprintf("#%d", pr.Number), colNum)
 			title := pad(truncate(pr.Title, colTitle-1), colTitle)
 			author := pad(truncate(pr.Author.Login, colAuthor-1), colAuthor)
+			reviewer := pad(truncate(getReviewer(pr), colReviewer-1), colReviewer)
 			branch := pad(truncate(pr.HeadRefName, colBranch-1), colBranch)
 			adds := fmt.Sprintf("+%d", pr.Additions)
 			dels := fmt.Sprintf("-%d", pr.Deletions)
 
 			if isSelected {
-				line := cursor + status + repo + num + title + author + branch + adds + " " + dels
+				line := cursor + status + repo + num + title + author + reviewer + branch + adds + " " + dels
 				s.WriteString(selectedStyle.Render(line))
 			} else {
 				s.WriteString(cursor)
@@ -443,6 +474,7 @@ func (m model) View() string {
 				s.WriteString(normalStyle.Render(num))
 				s.WriteString(normalStyle.Render(title))
 				s.WriteString(dimStyle.Render(author))
+				s.WriteString(reviewRequestedStyle.Render(reviewer))
 				s.WriteString(branchStyle.Render(branch))
 				s.WriteString(additionsStyle.Render(adds) + " ")
 				s.WriteString(deletionsStyle.Render(dels))
@@ -495,8 +527,12 @@ func stripAnsi(s string) string {
 }
 
 func main() {
-	// Output file for shell integration
-	outputFile := os.Getenv("HOME") + "/.gpr-selection"
+	// Output file for shell integration (just the directory path)
+	outputFile := "/tmp/gpr-selection"
+	devDir := os.Getenv("GPR_DEV_DIR")
+	if devDir == "" {
+		devDir = os.Getenv("HOME") + "/Development"
+	}
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
 	finalModel, err := p.Run()
@@ -507,13 +543,24 @@ func main() {
 
 	m := finalModel.(model)
 	if m.selected != nil {
-		result := OutputResult{
-			Repo:   m.selected.Repository.Name,
-			Branch: m.selected.HeadRefName,
-			Number: m.selected.Number,
+		repoPath := devDir + "/" + m.selected.Repository.Name
+
+		// Change to repo directory and run gh pr checkout
+		if err := os.Chdir(repoPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: could not cd to %s: %v\n", repoPath, err)
+			os.Exit(1)
 		}
-		output, _ := json.Marshal(result)
-		os.WriteFile(outputFile, output, 0644)
+
+		cmd := exec.Command("gh", "pr", "checkout", fmt.Sprintf("%d", m.selected.Number), "--force")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: gh pr checkout failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Write just the path for shell to cd into
+		os.WriteFile(outputFile, []byte(repoPath), 0644)
 	} else {
 		os.Remove(outputFile)
 	}

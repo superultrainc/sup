@@ -32,6 +32,8 @@ esac
 # Shell config to add
 SHELL_CONFIG="
 # gpr - GitHub PR picker
+
+unalias gpr # reserve gpr (used by ohmyzsh git plugin)
 export GPR_DEV_DIR=\"$DEV_DIR\"
 gpr() {
   rm -f /tmp/gpr-selection

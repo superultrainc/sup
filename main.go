@@ -340,10 +340,7 @@ func fetchPRs() tea.Msg {
 }
 
 func (m model) Init() tea.Cmd {
-	if m.refreshing {
-		return tea.Batch(fetchPRs, spinnerTick())
-	}
-	return fetchPRs
+	return tea.Batch(fetchPRs, spinnerTick())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -425,7 +422,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		if m.refreshing {
+		if m.loading || m.refreshing {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
 			return m, spinnerTick()
 		}
@@ -641,7 +638,8 @@ func (m model) View() string {
 	}
 
 	if m.loading {
-		s.WriteString(dimStyle.Render("  Loading..."))
+		spinner := spinnerFrames[m.spinnerFrame]
+		s.WriteString(loadingStyle.Render("  " + spinner + " Loading..."))
 		s.WriteString("\n")
 		return s.String()
 	}

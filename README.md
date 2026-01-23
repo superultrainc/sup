@@ -1,31 +1,30 @@
-# gpr
+# spr
 
-A terminal UI for browsing and selecting open PRs across the superultrainc organization.
+A terminal UI for browsing and checking out GitHub PRs.
 
-![gpr screenshot](screenshot.png)
+![spr screenshot](screenshot.png)
 
 ## Install
 
 ```bash
-./install.sh
-```
+# Using go install
+go install github.com/yourusername/spr@latest
 
-This builds the binary, installs it to `~/.local/bin`, and adds the `gco` shell function to your shell config.
+# Or clone and build
+git clone https://github.com/yourusername/spr
+cd spr && ./install.sh
+```
 
 ## Usage
 
-### `gpr`
-
-Opens an interactive PR picker showing all open PRs in the org. Select a PR to write its info to `~/.gpr-selection`.
-
-### `gco`
-
-Runs `gpr`, then checks out the selected PR's branch in the local repo:
-
 ```bash
-gco
-# Opens picker → selects PR → cd ~/Development/<repo> → git checkout <branch>
+spr          # Show PRs from your GitHub organizations (auto-detected)
+spr --mine   # Show PRs you're involved in (authored, reviewing, mentioned)
 ```
+
+**Zero config required** - spr automatically detects your GitHub organizations.
+
+Select a PR and press Enter to check it out locally.
 
 ## Keybindings
 
@@ -37,11 +36,19 @@ gco
 | `G` | Go to bottom |
 | `/` | Filter PRs |
 | `o` | Open PR in browser |
-| `Enter` | Select PR |
+| `Enter` | Checkout PR |
 | `q` / `Esc` | Quit |
+
+## Configuration (optional)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SPR_ORG` | Override org detection (comma-separated) | auto-detected |
+| `SPR_DEV_DIR` | Override repo location search | auto-detected |
+
+Repos are automatically found in: `~/Development`, `~/dev`, `~/projects`, `~/code`, `~/src`, `~/repos`, `~/github`, `~/git`, `~`
 
 ## Requirements
 
-- [gh](https://cli.github.com/) CLI (authenticated)
-- [jq](https://jqlang.github.io/jq/) (for the `gco` function)
+- [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`)
 - Go 1.21+ (for building)

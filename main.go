@@ -5,12 +5,63 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+var (
+	orgs     []string // Auto-detected or from SPR_ORG
+	mineMode bool     // Show PRs involving current user
+	demoMode bool     // Show mock data for screenshots
+)
+
+// Common locations where repos might be cloned
+var defaultDevDirs = []string{
+	"Development",
+	"dev",
+	"projects",
+	"code",
+	"src",
+	"repos",
+	"github",
+	"git",
+	"",
+}
+
+func getCacheFilePath() string {
+	cacheDir := os.Getenv("XDG_CACHE_HOME")
+	if cacheDir == "" {
+		cacheDir = os.Getenv("HOME") + "/.cache"
+	}
+	cacheDir = filepath.Join(cacheDir, "spr")
+	os.MkdirAll(cacheDir, 0755)
+	return filepath.Join(cacheDir, "prs.json")
+}
+
+func loadCachedPRs() []PR {
+	data, err := os.ReadFile(getCacheFilePath())
+	if err != nil {
+		return nil
+	}
+	var prs []PR
+	if err := json.Unmarshal(data, &prs); err != nil {
+		return nil
+	}
+	return prs
+}
+
+func savePRsToCache(prs []PR) {
+	data, err := json.Marshal(prs)
+	if err != nil {
+		return
+	}
+	os.WriteFile(getCacheFilePath(), data, 0644)
+}
 
 type PR struct {
 	Number      int    `json:"number"`
@@ -23,7 +74,10 @@ type PR struct {
 		Login string `json:"login"`
 	} `json:"author"`
 	Repository struct {
-		Name string `json:"name"`
+		Name  string `json:"name"`
+		Owner struct {
+			Login string `json:"login"`
+		} `json:"owner"`
 	} `json:"repository"`
 	ReviewDecision string `json:"reviewDecision"`
 	ReviewRequests struct {
@@ -45,6 +99,8 @@ type PR struct {
 	} `json:"reviews"`
 }
 
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 type model struct {
 	prs          []PR
 	filtered     []PR
@@ -57,7 +113,9 @@ type model struct {
 	width        int
 	height       int
 	loading      bool
-	visibleCount int // for animation
+	refreshing   bool // true when fetching new data while showing cached data
+	visibleCount int  // for animation
+	spinnerFrame int  // for loading spinner
 }
 
 type prsLoadedMsg struct {
@@ -66,10 +124,17 @@ type prsLoadedMsg struct {
 }
 
 type tickMsg struct{}
+type spinnerTickMsg struct{}
 
 func tick() tea.Cmd {
 	return tea.Tick(time.Millisecond*15, func(t time.Time) tea.Msg {
 		return tickMsg{}
+	})
+}
+
+func spinnerTick() tea.Cmd {
+	return tea.Tick(time.Millisecond*80, func(t time.Time) tea.Msg {
+		return spinnerTickMsg{}
 	})
 }
 
@@ -121,7 +186,28 @@ var (
 			Foreground(lipgloss.Color("141"))
 )
 
+func sortPRsByOldestFirst(prs []PR) {
+	sort.Slice(prs, func(i, j int) bool {
+		return prs[i].Number < prs[j].Number
+	})
+}
+
 func initialModel() model {
+	// Skip cache in demo mode
+	if !demoMode {
+		cached := loadCachedPRs()
+		if cached != nil {
+			sortPRsByOldestFirst(cached)
+			return model{
+				prs:          cached,
+				filtered:     cached,
+				cursor:       0,
+				loading:      false,
+				refreshing:   true,
+				visibleCount: len(cached),
+			}
+		}
+	}
 	return model{
 		prs:          []PR{},
 		filtered:     []PR{},
@@ -139,9 +225,88 @@ type graphQLResponse struct {
 	} `json:"data"`
 }
 
+func mockPRs() []PR {
+	mockJSON := `[
+		{"number": 142, "title": "Add user authentication flow", "headRefName": "feature/auth-flow", "isDraft": false, "additions": 847, "deletions": 123, "author": {"login": "sarah"}, "repository": {"name": "backend-api", "owner": {"login": "acme-corp"}}, "reviewDecision": "APPROVED", "reviews": {"nodes": [{"author": {"login": "mike"}, "state": "APPROVED"}]}},
+		{"number": 287, "title": "Fix memory leak in worker pool", "headRefName": "fix/worker-memory", "isDraft": false, "additions": 34, "deletions": 89, "author": {"login": "alex"}, "repository": {"name": "job-runner", "owner": {"login": "acme-corp"}}, "reviewDecision": "CHANGES_REQUESTED", "reviews": {"nodes": [{"author": {"login": "sarah"}, "state": "CHANGES_REQUESTED"}]}},
+		{"number": 91, "title": "Update dashboard metrics components", "headRefName": "feature/metrics-v2", "isDraft": false, "additions": 456, "deletions": 201, "author": {"login": "mike"}, "repository": {"name": "web-app", "owner": {"login": "acme-corp"}}, "reviewDecision": "REVIEW_REQUIRED", "reviewRequests": {"totalCount": 1, "nodes": [{"requestedReviewer": {"login": "alex"}}]}},
+		{"number": 445, "title": "Implement rate limiting middleware", "headRefName": "feature/rate-limit", "isDraft": true, "additions": 234, "deletions": 12, "author": {"login": "jordan"}, "repository": {"name": "backend-api", "owner": {"login": "acme-corp"}}},
+		{"number": 156, "title": "Add PostgreSQL connection pooling", "headRefName": "feature/pg-pool", "isDraft": false, "additions": 178, "deletions": 45, "author": {"login": "chris"}, "repository": {"name": "data-service", "owner": {"login": "acme-corp"}}, "reviewDecision": "REVIEW_REQUIRED", "reviewRequests": {"totalCount": 1, "nodes": [{"requestedReviewer": {"login": "jordan"}}]}, "reviews": {"nodes": [{"author": {"login": "alex"}, "state": "COMMENTED"}]}},
+		{"number": 312, "title": "Refactor notification service", "headRefName": "refactor/notifications", "isDraft": false, "additions": 623, "deletions": 891, "author": {"login": "taylor"}, "repository": {"name": "backend-api", "owner": {"login": "acme-corp"}}, "reviewDecision": "APPROVED", "reviews": {"nodes": [{"author": {"login": "chris"}, "state": "APPROVED"}]}},
+		{"number": 78, "title": "Add dark mode support", "headRefName": "feature/dark-mode", "isDraft": false, "additions": 567, "deletions": 234, "author": {"login": "sam"}, "repository": {"name": "web-app", "owner": {"login": "acme-corp"}}, "reviewDecision": "REVIEW_REQUIRED", "reviewRequests": {"totalCount": 1, "nodes": [{"requestedReviewer": {"login": "taylor"}}]}},
+		{"number": 203, "title": "Upgrade to Go 1.22", "headRefName": "chore/go-upgrade", "isDraft": true, "additions": 23, "deletions": 19, "author": {"login": "alex"}, "repository": {"name": "cli-tools", "owner": {"login": "acme-corp"}}}
+	]`
+	var prs []PR
+	json.Unmarshal([]byte(mockJSON), &prs)
+	return prs
+}
+
+// findRepoPath searches for a repo in common locations
+func findRepoPath(repoName string) string {
+	home := os.Getenv("HOME")
+
+	// Check SPR_DEV_DIR first if set
+	if devDir := os.Getenv("SPR_DEV_DIR"); devDir != "" {
+		path := filepath.Join(devDir, repoName)
+		if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+			return path
+		}
+	}
+
+	// Search common locations
+	for _, dir := range defaultDevDirs {
+		var path string
+		if dir == "" {
+			path = filepath.Join(home, repoName)
+		} else {
+			path = filepath.Join(home, dir, repoName)
+		}
+		if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+			return path
+		}
+	}
+
+	return ""
+}
+
+// fetchUserOrgs gets the list of organizations the user belongs to
+func fetchUserOrgs() ([]string, error) {
+	cmd := exec.Command("gh", "api", "user/orgs", "--jq", ".[].login")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch orgs: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var result []string
+	for _, line := range lines {
+		if line = strings.TrimSpace(line); line != "" {
+			result = append(result, line)
+		}
+	}
+	return result, nil
+}
+
 func fetchPRs() tea.Msg {
-	query := `{
-		search(query: "org:superultrainc is:pr is:open", type: ISSUE, first: 100) {
+	if demoMode {
+		return prsLoadedMsg{prs: mockPRs()}
+	}
+
+	// Build the search query
+	var searchQuery string
+	if mineMode {
+		searchQuery = "involves:@me is:pr is:open"
+	} else {
+		// Build org query: org:foo org:bar ...
+		var orgParts []string
+		for _, org := range orgs {
+			orgParts = append(orgParts, "org:"+org)
+		}
+		searchQuery = strings.Join(orgParts, " ") + " is:pr is:open"
+	}
+
+	query := fmt.Sprintf(`{
+		search(query: "%s", type: ISSUE, first: 100) {
 			nodes {
 				... on PullRequest {
 					number
@@ -151,14 +316,14 @@ func fetchPRs() tea.Msg {
 					additions
 					deletions
 					author { login }
-					repository { name }
+					repository { name owner { login } }
 					reviewDecision
 					reviewRequests(first: 1) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
 					reviews(last: 1) { nodes { author { login } state } }
 				}
 			}
 		}
-	}`
+	}`, searchQuery)
 
 	cmd := exec.Command("gh", "api", "graphql", "-f", "query="+query)
 	output, err := cmd.Output()
@@ -175,6 +340,9 @@ func fetchPRs() tea.Msg {
 }
 
 func (m model) Init() tea.Cmd {
+	if m.refreshing {
+		return tea.Batch(fetchPRs, spinnerTick())
+	}
 	return fetchPRs
 }
 
@@ -189,13 +357,62 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.err = msg.err
 			m.loading = false
+			m.refreshing = false
 			return m, nil
 		}
+
+		// Sort PRs oldest first
+		sortPRsByOldestFirst(msg.prs)
+
+		// Save to cache (skip in demo mode)
+		if !demoMode {
+			savePRsToCache(msg.prs)
+		}
+
+		// Preserve selection by finding the same PR in the new list
+		var selectedPRNumber int
+		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+			selectedPRNumber = m.filtered[m.cursor].Number
+		}
+
 		m.prs = msg.prs
-		m.filtered = msg.prs
+
+		// Re-apply filter if active
+		if m.filterText != "" {
+			m.applyFilter()
+		} else {
+			m.filtered = msg.prs
+		}
+
+		// Restore cursor position to the same PR if it still exists
+		if selectedPRNumber > 0 {
+			for i, pr := range m.filtered {
+				if pr.Number == selectedPRNumber {
+					m.cursor = i
+					break
+				}
+			}
+		}
+
+		// Clamp cursor to valid range
+		if m.cursor >= len(m.filtered) {
+			m.cursor = len(m.filtered) - 1
+		}
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+
+		wasRefreshing := m.refreshing
 		m.loading = false
-		m.visibleCount = 0
-		return m, tick()
+		m.refreshing = false
+
+		// Only animate if we weren't showing cached data
+		if !wasRefreshing {
+			m.visibleCount = 0
+			return m, tick()
+		}
+		m.visibleCount = len(m.filtered)
+		return m, nil
 
 	case tickMsg:
 		if m.visibleCount < len(m.filtered) {
@@ -204,6 +421,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.visibleCount = len(m.filtered)
 			}
 			return m, tick()
+		}
+		return m, nil
+
+	case spinnerTickMsg:
+		if m.refreshing {
+			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+			return m, spinnerTick()
 		}
 		return m, nil
 
@@ -323,7 +547,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "o":
 		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
 			pr := m.filtered[m.cursor]
-			url := fmt.Sprintf("https://github.com/superultrainc/%s/pull/%d", pr.Repository.Name, pr.Number)
+			url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
 			exec.Command("open", url).Start()
 		}
 		return m, nil
@@ -381,6 +605,7 @@ func getDiffStats(pr PR) string {
 func (m model) View() string {
 	var s strings.Builder
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	loadingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 
 	// Column widths - defined early for header
 	const (
@@ -483,27 +708,44 @@ func (m model) View() string {
 		}
 
 		s.WriteString(fmt.Sprintf("\n  %d/%d PRs", len(m.filtered), len(m.prs)))
+		if m.refreshing {
+			spinner := spinnerFrames[m.spinnerFrame]
+			s.WriteString(loadingStyle.Render("  " + spinner + " Refreshing"))
+		}
 	}
 
 	s.WriteString("\n\n")
-	s.WriteString(helpStyle.Render("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter • o: open • enter: select • q/esc: quit"))
+	s.WriteString(helpStyle.Render("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter • o: open • enter: checkout • q/esc: quit"))
 	s.WriteString("\n")
 
 	return s.String()
 }
 
+func displayWidth(s string) int {
+	return lipgloss.Width(s)
+}
+
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	if displayWidth(s) <= max {
 		return s
 	}
-	return s[:max-3] + "..."
+	// Truncate rune by rune until we fit
+	runes := []rune(s)
+	for i := len(runes); i > 0; i-- {
+		truncated := string(runes[:i]) + "..."
+		if displayWidth(truncated) <= max {
+			return truncated
+		}
+	}
+	return "..."
 }
 
 func pad(s string, width int) string {
-	if len(s) >= width {
+	w := displayWidth(s)
+	if w >= width {
 		return s
 	}
-	return s + strings.Repeat(" ", width-len(s))
+	return s + strings.Repeat(" ", width-w)
 }
 
 func stripAnsi(s string) string {
@@ -527,11 +769,37 @@ func stripAnsi(s string) string {
 }
 
 func main() {
-	// Output file for shell integration (just the directory path)
-	outputFile := "/tmp/gpr-selection"
-	devDir := os.Getenv("GPR_DEV_DIR")
-	if devDir == "" {
-		devDir = os.Getenv("HOME") + "/Development"
+	// Parse flags
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "--demo":
+			demoMode = true
+		case "--mine", "-m":
+			mineMode = true
+		}
+	}
+
+	// In demo mode, skip org detection
+	if demoMode {
+		orgs = []string{"acme-corp"}
+	} else if !mineMode {
+		// Check for SPR_ORG override first
+		if orgEnv := os.Getenv("SPR_ORG"); orgEnv != "" {
+			orgs = strings.Split(orgEnv, ",")
+		} else {
+			// Auto-detect orgs from GitHub
+			var err error
+			orgs, err = fetchUserOrgs()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				fmt.Fprintln(os.Stderr, "Make sure you're logged in with: gh auth login")
+				os.Exit(1)
+			}
+			if len(orgs) == 0 {
+				fmt.Fprintln(os.Stderr, "No organizations found. Use --mine to see your PRs, or set SPR_ORG.")
+				os.Exit(1)
+			}
+		}
 	}
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
@@ -542,8 +810,21 @@ func main() {
 	}
 
 	m := finalModel.(model)
+	if demoMode {
+		return
+	}
+
 	if m.selected != nil {
-		repoPath := devDir + "/" + m.selected.Repository.Name
+		pr := m.selected
+		repoPath := findRepoPath(pr.Repository.Name)
+
+		if repoPath == "" {
+			fmt.Fprintf(os.Stderr, "Repo '%s' not found in common locations.\n", pr.Repository.Name)
+			fmt.Fprintf(os.Stderr, "Clone it: gh repo clone %s/%s\n",
+				pr.Repository.Owner.Login, pr.Repository.Name)
+			fmt.Fprintf(os.Stderr, "Or set SPR_DEV_DIR to your repos directory.\n")
+			os.Exit(1)
+		}
 
 		// Change to repo directory and run gh pr checkout
 		if err := os.Chdir(repoPath); err != nil {
@@ -551,17 +832,13 @@ func main() {
 			os.Exit(1)
 		}
 
-		cmd := exec.Command("gh", "pr", "checkout", fmt.Sprintf("%d", m.selected.Number), "--force")
+		fmt.Printf("Checking out PR #%d in %s...\n", pr.Number, repoPath)
+		cmd := exec.Command("gh", "pr", "checkout", fmt.Sprintf("%d", pr.Number), "--force")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: gh pr checkout failed: %v\n", err)
 			os.Exit(1)
 		}
-
-		// Write just the path for shell to cd into
-		os.WriteFile(outputFile, []byte(repoPath), 0644)
-	} else {
-		os.Remove(outputFile)
 	}
 }

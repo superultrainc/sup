@@ -1,16 +1,16 @@
 #!/bin/bash
 set -e
 
-# Install spr - GitHub PR picker
+# Install sup - GitHub PR picker
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
-echo "Building spr..."
-go build -o spr .
+echo "Building sup..."
+go build -o sup .
 
 echo "Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
-mv spr "$INSTALL_DIR/spr"
+mv sup "$INSTALL_DIR/sup"
 
 # Check if install dir is in PATH
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
@@ -20,4 +20,4 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     echo ""
 fi
 
-echo "Done! Run: spr"
+echo "Done! Run: sup"

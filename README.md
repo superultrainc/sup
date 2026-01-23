@@ -1,28 +1,28 @@
-# spr
+# sup
 
 A terminal UI for browsing and checking out GitHub PRs.
 
-![spr screenshot](screenshot.png)
+![sup screenshot](screenshot.png)
 
 ## Install
 
 ```bash
 # Using go install
-go install github.com/yourusername/spr@latest
+go install github.com/yourusername/sup@latest
 
 # Or clone and build
-git clone https://github.com/yourusername/spr
-cd spr && ./install.sh
+git clone https://github.com/yourusername/sup
+cd sup && ./install.sh
 ```
 
 ## Usage
 
 ```bash
-spr          # Show PRs from your GitHub organizations (auto-detected)
-spr --mine   # Show PRs you're involved in (authored, reviewing, mentioned)
+sup          # Show PRs from your GitHub organizations (auto-detected)
+sup --mine   # Show PRs you're involved in (authored, reviewing, mentioned)
 ```
 
-**Zero config required** - spr automatically detects your GitHub organizations.
+**Zero config required** - sup automatically detects your GitHub organizations.
 
 Select a PR and press Enter to check it out locally.
 
@@ -43,8 +43,8 @@ Select a PR and press Enter to check it out locally.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SPR_ORG` | Override org detection (comma-separated) | auto-detected |
-| `SPR_DEV_DIR` | Override repo location search | auto-detected |
+| `SUP_ORG` | Override org detection (comma-separated) | auto-detected |
+| `SUP_DEV_DIR` | Override repo location search | auto-detected |
 
 Repos are automatically found in: `~/Development`, `~/dev`, `~/projects`, `~/code`, `~/src`, `~/repos`, `~/github`, `~/git`, `~`
 

@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	orgs     []string // Auto-detected or from SPR_ORG
+	orgs     []string // Auto-detected or from SUP_ORG
 	mineMode bool     // Show PRs involving current user
 	demoMode bool     // Show mock data for screenshots
 )
@@ -38,7 +38,7 @@ func getCacheFilePath() string {
 	if cacheDir == "" {
 		cacheDir = os.Getenv("HOME") + "/.cache"
 	}
-	cacheDir = filepath.Join(cacheDir, "spr")
+	cacheDir = filepath.Join(cacheDir, "sup")
 	os.MkdirAll(cacheDir, 0755)
 	return filepath.Join(cacheDir, "prs.json")
 }
@@ -245,8 +245,8 @@ func mockPRs() []PR {
 func findRepoPath(repoName string) string {
 	home := os.Getenv("HOME")
 
-	// Check SPR_DEV_DIR first if set
-	if devDir := os.Getenv("SPR_DEV_DIR"); devDir != "" {
+	// Check SUP_DEV_DIR first if set
+	if devDir := os.Getenv("SUP_DEV_DIR"); devDir != "" {
 		path := filepath.Join(devDir, repoName)
 		if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
 			return path
@@ -783,8 +783,8 @@ func main() {
 	if demoMode {
 		orgs = []string{"acme-corp"}
 	} else if !mineMode {
-		// Check for SPR_ORG override first
-		if orgEnv := os.Getenv("SPR_ORG"); orgEnv != "" {
+		// Check for SUP_ORG override first
+		if orgEnv := os.Getenv("SUP_ORG"); orgEnv != "" {
 			orgs = strings.Split(orgEnv, ",")
 		} else {
 			// Auto-detect orgs from GitHub
@@ -796,7 +796,7 @@ func main() {
 				os.Exit(1)
 			}
 			if len(orgs) == 0 {
-				fmt.Fprintln(os.Stderr, "No organizations found. Use --mine to see your PRs, or set SPR_ORG.")
+				fmt.Fprintln(os.Stderr, "No organizations found. Use --mine to see your PRs, or set SUP_ORG.")
 				os.Exit(1)
 			}
 		}
@@ -822,7 +822,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Repo '%s' not found in common locations.\n", pr.Repository.Name)
 			fmt.Fprintf(os.Stderr, "Clone it: gh repo clone %s/%s\n",
 				pr.Repository.Owner.Login, pr.Repository.Name)
-			fmt.Fprintf(os.Stderr, "Or set SPR_DEV_DIR to your repos directory.\n")
+			fmt.Fprintf(os.Stderr, "Or set SUP_DEV_DIR to your repos directory.\n")
 			os.Exit(1)
 		}
 

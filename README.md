@@ -7,17 +7,16 @@ A terminal UI for browsing and checking out GitHub PRs.
 ## Requirements
 
 - [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`)
-- Go 1.21+ (for building)
 
 ## Install
 
 ```bash
-# Using go install
-go install github.com/superultrainc/sup@latest
+curl -sSL https://raw.githubusercontent.com/superultrainc/sup/main/install.sh | bash
+```
 
-# Or clone and build
-git clone https://github.com/superultrainc/sup
-cd sup && ./install.sh
+Or with Go:
+```bash
+go install github.com/superultrainc/sup@latest
 ```
 
 ## Usage

@@ -4,6 +4,11 @@ A terminal UI for browsing and checking out GitHub PRs.
 
 ![sup screenshot](screenshot.webp)
 
+## Requirements
+
+- [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`)
+- Go 1.21+ (for building)
+
 ## Install
 
 ```bash
@@ -47,8 +52,3 @@ Select a PR and press Enter to check it out locally.
 | `SUP_DEV_DIR` | Override repo location search | auto-detected |
 
 Repos are automatically found in: `~/Development`, `~/dev`, `~/projects`, `~/code`, `~/src`, `~/repos`, `~/github`, `~/git`, `~`
-
-## Requirements
-
-- [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`)
-- Go 1.21+ (for building)

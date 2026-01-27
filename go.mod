@@ -1,4 +1,4 @@
-module gpr
+module github.com/superultrainc/sup
 
 go 1.21
 

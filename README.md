@@ -2,16 +2,16 @@
 
 A terminal UI for browsing and checking out GitHub PRs.
 
-![sup screenshot](screenshot.png)
+![sup screenshot](screenshot.webp)
 
 ## Install
 
 ```bash
 # Using go install
-go install github.com/yourusername/sup@latest
+go install github.com/superultrainc/sup@latest
 
 # Or clone and build
-git clone https://github.com/yourusername/sup
+git clone https://github.com/superultrainc/sup
 cd sup && ./install.sh
 ```
 

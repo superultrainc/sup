@@ -14,9 +14,21 @@ A terminal UI for browsing and checking out GitHub PRs.
 curl -sSL https://raw.githubusercontent.com/superultrainc/sup/main/install.sh | bash
 ```
 
-Or with Go:
+Or with Go (requires manual shell setup):
 ```bash
 go install github.com/superultrainc/sup@latest
+```
+
+If using `go install`, add this to your `~/.zshrc` or `~/.bashrc` for auto-cd after checkout:
+```bash
+sup() {
+  rm -f /tmp/sup-selection
+  command sup "$@"
+  if [[ -f /tmp/sup-selection ]]; then
+    cd "$(cat /tmp/sup-selection)"
+    rm -f /tmp/sup-selection
+  fi
+}
 ```
 
 ## Usage

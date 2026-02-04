@@ -20,6 +20,9 @@ var (
 	demoMode bool     // Show mock data for screenshots
 )
 
+// Output file for shell integration (shell wrapper reads this to cd)
+const selectionFile = "/tmp/sup-selection"
+
 // Common locations where repos might be cloned
 var defaultDevDirs = []string{
 	"Development",
@@ -604,16 +607,27 @@ func (m model) View() string {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	loadingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 
-	// Column widths - defined early for header
+	// Fixed column widths
 	const (
 		colStatus   = 12
-		colRepo     = 28
 		colNum      = 6
-		colTitle    = 32
 		colAuthor   = 14
 		colReviewer = 14
-		colBranch   = 20
+		colDiff     = 16 // approximate width for +/- stats
+		colPadding  = 4  // cursor + spacing
 	)
+
+	// Calculate dynamic column widths based on terminal width
+	fixedWidth := colStatus + colNum + colAuthor + colReviewer + colDiff + colPadding
+	flexWidth := m.width - fixedWidth
+	if flexWidth < 60 {
+		flexWidth = 60 // minimum for flexible columns
+	}
+
+	// Distribute flexible space: 30% repo, 40% title, 30% branch
+	colRepo := flexWidth * 30 / 100
+	colTitle := flexWidth * 40 / 100
+	colBranch := flexWidth - colRepo - colTitle
 
 	s.WriteString("\n")
 
@@ -628,7 +642,11 @@ func (m model) View() string {
 	// Always show header
 	s.WriteString(dimStyle.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
 	s.WriteString("\n")
-	s.WriteString(dimStyle.Render("  " + strings.Repeat("─", colStatus+colRepo+colNum+colTitle+colAuthor+colReviewer+colBranch+10)))
+	separatorWidth := m.width - 2 // account for "  " prefix
+	if separatorWidth < 60 {
+		separatorWidth = 60
+	}
+	s.WriteString(dimStyle.Render("  " + strings.Repeat("─", separatorWidth)))
 	s.WriteString("\n")
 
 	if m.err != nil {
@@ -838,5 +856,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: gh pr checkout failed: %v\n", err)
 			os.Exit(1)
 		}
+
+		// Write path for shell wrapper to cd into
+		os.WriteFile(selectionFile, []byte(repoPath), 0644)
+	} else {
+		// No selection - clean up any stale selection file
+		os.Remove(selectionFile)
 	}
 }

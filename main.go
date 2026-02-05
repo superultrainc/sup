@@ -147,39 +147,77 @@ var (
 			Foreground(lipgloss.Color("205"))
 
 	selectedStyle = lipgloss.NewStyle().
+			Bold(true)
+
+	caretStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("229")).
-			Background(lipgloss.Color("57"))
+			Foreground(lipgloss.Color("33"))
 
 	normalStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("252"))
 
+	selectedNormalStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("15"))
+
 	draftStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
+
+	selectedDraftStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("250"))
 
 	approvedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("78"))
 
+	selectedApprovedStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("114"))
+
 	changesRequestedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("196"))
+
+	selectedChangesRequestedStyle = lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color("203"))
 
 	reviewRequestedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("214"))
 
+	selectedReviewRequestedStyle = lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color("221"))
+
 	commentedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("117"))
+
+	selectedCommentedStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("159"))
 
 	openStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("39"))
 
+	selectedOpenStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("81"))
+
 	additionsStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("78"))
+
+	selectedAdditionsStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("114"))
 
 	deletionsStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196"))
 
+	selectedDeletionsStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("203"))
+
 	filterStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("205")).
+			Foreground(lipgloss.Color("220")).
 			Bold(true)
 
 	helpStyle = lipgloss.NewStyle().
@@ -187,6 +225,10 @@ var (
 
 	branchStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("141"))
+
+	selectedBranchStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("183"))
 )
 
 func sortPRsByOldestFirst(prs []PR) {
@@ -432,8 +474,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		// Allow quitting even during animation
-		if msg.String() == "q" || msg.String() == "ctrl+c" || msg.String() == "esc" {
+		// Allow quitting even during animation (ctrl+c always quits)
+		if msg.String() == "q" || msg.String() == "ctrl+c" {
 			m.quitting = true
 			return m, tea.Quit
 		}
@@ -444,6 +486,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.filterMode {
 			return m.handleFilterInput(msg)
+		}
+		// Allow esc to quit only when not filtering
+		if msg.String() == "esc" {
+			m.quitting = true
+			return m, tea.Quit
 		}
 		return m.handleNormalInput(msg)
 	}
@@ -472,6 +519,14 @@ func (m model) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	default:
+		switch msg.String() {
+		case "backspace", "ctrl+h", "del":
+			if len(m.filterText) > 0 {
+				m.filterText = m.filterText[:len(m.filterText)-1]
+				m.applyFilter()
+			}
+			return m, nil
+		}
 		if msg.Type == tea.KeyRunes {
 			m.filterText += string(msg.Runes)
 			m.applyFilter()
@@ -490,8 +545,10 @@ func (m *model) applyFilter() {
 	filter := strings.ToLower(m.filterText)
 	m.filtered = []PR{}
 	for _, pr := range m.prs {
-		searchText := strings.ToLower(fmt.Sprintf("%s %s %s %s",
-			pr.Repository.Name, pr.Title, pr.Author.Login, pr.HeadRefName))
+		statusLabel := statusLabelForFilter(pr)
+		searchText := strings.ToLower(fmt.Sprintf("%s %s %s %s %s %s #%d %d",
+			pr.Repository.Name, pr.Title, pr.Author.Login, pr.HeadRefName, statusLabel,
+			pr.Repository.Owner.Login, pr.Number, pr.Number))
 		if strings.Contains(searchText, filter) {
 			m.filtered = append(m.filtered, pr)
 		}
@@ -577,6 +634,46 @@ func getStatusBadge(pr PR) string {
 	}
 }
 
+func getSelectedStatusBadge(pr PR) string {
+	if pr.IsDraft {
+		return selectedDraftStyle.Render("[Draft]")
+	}
+
+	switch pr.ReviewDecision {
+	case "APPROVED":
+		return selectedApprovedStyle.Render("[Approved]")
+	case "CHANGES_REQUESTED":
+		return selectedChangesRequestedStyle.Render("[Denied]")
+	case "REVIEW_REQUIRED":
+		if len(pr.Reviews.Nodes) > 0 && pr.Reviews.Nodes[0].State == "COMMENTED" {
+			return selectedCommentedStyle.Render("[Commented]")
+		}
+		return selectedReviewRequestedStyle.Render("[Review]")
+	default:
+		return selectedOpenStyle.Render("[Open]")
+	}
+}
+
+func statusLabelForFilter(pr PR) string {
+	if pr.IsDraft {
+		return "draft"
+	}
+
+	switch pr.ReviewDecision {
+	case "APPROVED":
+		return "approved"
+	case "CHANGES_REQUESTED":
+		return "denied"
+	case "REVIEW_REQUIRED":
+		if len(pr.Reviews.Nodes) > 0 && pr.Reviews.Nodes[0].State == "COMMENTED" {
+			return "commented"
+		}
+		return "review"
+	default:
+		return "open"
+	}
+}
+
 func getReviewer(pr PR) string {
 	// First check requested reviewers
 	if len(pr.ReviewRequests.Nodes) > 0 {
@@ -630,22 +727,28 @@ func (m model) View() string {
 	colBranch := flexWidth - colRepo - colTitle
 
 	s.WriteString("\n")
-
-	if m.filterMode {
-		s.WriteString(filterStyle.Render(fmt.Sprintf("  / %s█", m.filterText)))
-		s.WriteString("\n\n")
-	} else if m.filterText != "" {
-		s.WriteString(filterStyle.Render(fmt.Sprintf("  Filter: %s", m.filterText)))
-		s.WriteString("\n\n")
-	}
-
-	// Always show header
-	s.WriteString(dimStyle.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
-	s.WriteString("\n")
 	separatorWidth := m.width - 2 // account for "  " prefix
 	if separatorWidth < 60 {
 		separatorWidth = 60
 	}
+	rowWidth := separatorWidth
+
+	filterLine := "  "
+	if m.filterMode {
+		filterLine = fmt.Sprintf("  / %s█", m.filterText)
+	} else if m.filterText != "" {
+		filterLine = fmt.Sprintf("  Filter: %s", m.filterText)
+	}
+	if filterLine == "  " {
+		s.WriteString(filterLine)
+	} else {
+		s.WriteString(filterStyle.Render(filterLine))
+	}
+	s.WriteString("\n")
+
+	// Always show header
+	s.WriteString(dimStyle.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
+	s.WriteString("\n")
 	s.WriteString(dimStyle.Render("  " + strings.Repeat("─", separatorWidth)))
 	s.WriteString("\n")
 
@@ -690,23 +793,43 @@ func (m model) View() string {
 
 			cursor := "  "
 			if isSelected {
-				cursor = "> "
+				cursor = "» "
 			}
 
 			// Prepare padded values
-			status := pad(stripAnsi(getStatusBadge(pr)), colStatus)
+			statusPlain := pad(stripAnsi(getStatusBadge(pr)), colStatus)
 			repo := pad(truncate(pr.Repository.Name, colRepo-1), colRepo)
 			num := pad(fmt.Sprintf("#%d", pr.Number), colNum)
 			title := pad(truncate(pr.Title, colTitle-1), colTitle)
 			author := pad(truncate(pr.Author.Login, colAuthor-1), colAuthor)
 			reviewer := pad(truncate(getReviewer(pr), colReviewer-1), colReviewer)
 			branch := pad(truncate(pr.HeadRefName, colBranch-1), colBranch)
-			adds := fmt.Sprintf("+%d", pr.Additions)
-			dels := fmt.Sprintf("-%d", pr.Deletions)
+			leftDiff := (colDiff - 1) / 2
+			rightDiff := colDiff - 1 - leftDiff
+			addsPlain := fmt.Sprintf("+%d", pr.Additions)
+			delsPlain := fmt.Sprintf("-%d", pr.Deletions)
+			addsPadded := padLeft(addsPlain, leftDiff)
+			delsPadded := padLeft(delsPlain, rightDiff)
+			diffPlain := addsPadded + " " + delsPadded
+			rowPlain := cursor + statusPlain + repo + num + title + author + reviewer + branch + diffPlain
 
 			if isSelected {
-				line := cursor + status + repo + num + title + author + reviewer + branch + adds + " " + dels
-				s.WriteString(selectedStyle.Render(line))
+				s.WriteString(caretStyle.Render(cursor))
+				s.WriteString(getSelectedStatusBadge(pr) + strings.Repeat(" ", colStatus-len(stripAnsi(getSelectedStatusBadge(pr)))))
+				s.WriteString(selectedNormalStyle.Render(repo))
+				s.WriteString(selectedNormalStyle.Render(num))
+				s.WriteString(selectedNormalStyle.Render(title))
+				s.WriteString(selectedStyle.Render(author))
+				s.WriteString(selectedReviewRequestedStyle.Render(reviewer))
+				s.WriteString(selectedBranchStyle.Render(branch))
+				s.WriteString(selectedAdditionsStyle.Render(addsPadded))
+				s.WriteString(" ")
+				s.WriteString(selectedDeletionsStyle.Render(delsPadded))
+
+				currentWidth := displayWidth(rowPlain)
+				if currentWidth < rowWidth {
+					s.WriteString(strings.Repeat(" ", rowWidth-currentWidth))
+				}
 			} else {
 				s.WriteString(cursor)
 				// Apply colors after padding
@@ -717,21 +840,31 @@ func (m model) View() string {
 				s.WriteString(dimStyle.Render(author))
 				s.WriteString(reviewRequestedStyle.Render(reviewer))
 				s.WriteString(branchStyle.Render(branch))
-				s.WriteString(additionsStyle.Render(adds) + " ")
-				s.WriteString(deletionsStyle.Render(dels))
+				s.WriteString(additionsStyle.Render(addsPadded))
+				s.WriteString(" ")
+				s.WriteString(deletionsStyle.Render(delsPadded))
+
+				currentWidth := displayWidth(rowPlain)
+				if currentWidth < rowWidth {
+					s.WriteString(strings.Repeat(" ", rowWidth-currentWidth))
+				}
 			}
 			s.WriteString("\n")
 		}
 
-		s.WriteString(fmt.Sprintf("\n  %d/%d PRs", len(m.filtered), len(m.prs)))
+		if m.filterText != "" {
+			s.WriteString(fmt.Sprintf("\n  %d of %d PRs", len(m.filtered), len(m.prs)))
+		} else {
+			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))
+		}
 		if m.refreshing {
 			spinner := spinnerFrames[m.spinnerFrame]
 			s.WriteString(loadingStyle.Render("  " + spinner + " Refreshing"))
 		}
 	}
 
-	s.WriteString("\n\n")
-	s.WriteString(helpStyle.Render("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter • o: open • enter: checkout • q/esc: quit"))
+	s.WriteString("\n")
+	s.WriteString(helpStyle.Render(truncateToWidth("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter • o: open • enter: checkout • q/esc: quit", rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()
@@ -762,6 +895,28 @@ func pad(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+func padLeft(s string, width int) string {
+	w := displayWidth(s)
+	if w >= width {
+		return s
+	}
+	return strings.Repeat(" ", width-w) + s
+}
+
+func truncateToWidth(s string, max int) string {
+	if displayWidth(s) <= max {
+		return s
+	}
+	runes := []rune(s)
+	for i := len(runes); i > 0; i-- {
+		truncated := string(runes[:i])
+		if displayWidth(truncated) <= max {
+			return truncated
+		}
+	}
+	return ""
 }
 
 func stripAnsi(s string) string {

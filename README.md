@@ -1,4 +1,12 @@
-# sup
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="sup-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="sup.png">
+  <img alt="sup" src="sup.png" width="200">
+</picture>
+
+[![Go](https://img.shields.io/badge/Go-1.21-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Release](https://img.shields.io/github/v/release/superultrainc/sup)](https://github.com/superultrainc/sup/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A terminal UI for browsing and checking out GitHub PRs.
 

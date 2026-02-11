@@ -62,8 +62,10 @@ Select a PR and press Enter to check it out locally.
 | `k` / `↑` | Move up |
 | `g` | Go to top |
 | `G` | Go to bottom |
-| `/` | Filter PRs |
+| `/` | Filter PRs (prefix with `@` to filter by reviewer) |
+| `r` | Filter to your review requests |
 | `o` | Open PR in browser |
+| `O` | Open all PRs needing review in browser |
 | `Enter` | Checkout PR |
 | `q` / `Esc` | Quit |
 

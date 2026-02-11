@@ -15,9 +15,10 @@ import (
 )
 
 var (
-	orgs     []string // Auto-detected or from SUP_ORG
-	mineMode bool     // Show PRs involving current user
-	demoMode bool     // Show mock data for screenshots
+	orgs        []string // Auto-detected or from SUP_ORG
+	mineMode    bool     // Show PRs involving current user
+	demoMode    bool     // Show mock data for screenshots
+	currentUser string   // Authenticated GitHub username
 )
 
 // Output file for shell integration (shell wrapper reads this to cd)
@@ -314,6 +315,16 @@ func findRepoPath(repoName string) string {
 	return ""
 }
 
+// getCurrentUser gets the authenticated GitHub username
+func getCurrentUser() string {
+	cmd := exec.Command("gh", "api", "user", "--jq", ".login")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
 // fetchUserOrgs gets the list of organizations the user belongs to
 func fetchUserOrgs() ([]string, error) {
 	cmd := exec.Command("gh", "api", "user/orgs", "--jq", ".[].login")
@@ -363,8 +374,8 @@ func fetchPRs() tea.Msg {
 					author { login }
 					repository { name owner { login } }
 					reviewDecision
-					reviewRequests(first: 1) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
-					reviews(last: 1) { nodes { author { login } state } }
+					reviewRequests(first: 5) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
+					reviews(last: 5) { nodes { author { login } state } }
 				}
 			}
 		}
@@ -503,8 +514,7 @@ func (m model) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		m.filterMode = false
 		m.filterText = ""
-		m.filtered = m.prs
-		m.cursor = 0
+		m.applyFilter()
 		return m, nil
 
 	case tea.KeyEnter:
@@ -543,12 +553,28 @@ func (m *model) applyFilter() {
 	}
 
 	filter := strings.ToLower(m.filterText)
-	m.filtered = []PR{}
+	m.filtered = nil
+
+	// @username prefix: match reviewer only
+	if strings.HasPrefix(filter, "@") {
+		userFilter := strings.TrimPrefix(filter, "@")
+		for _, pr := range m.prs {
+			reviewers := strings.ToLower(getAllReviewerNames(pr))
+			if reviewers != "" && strings.Contains(reviewers, userFilter) {
+				m.filtered = append(m.filtered, pr)
+			}
+		}
+		m.cursor = 0
+		return
+	}
+
+	// Default: search all fields including reviewer
 	for _, pr := range m.prs {
 		statusLabel := statusLabelForFilter(pr)
-		searchText := strings.ToLower(fmt.Sprintf("%s %s %s %s %s %s #%d %d",
+		reviewers := getAllReviewerNames(pr)
+		searchText := strings.ToLower(fmt.Sprintf("%s %s %s %s %s %s #%d %d %s",
 			pr.Repository.Name, pr.Title, pr.Author.Login, pr.HeadRefName, statusLabel,
-			pr.Repository.Owner.Login, pr.Number, pr.Number))
+			pr.Repository.Owner.Login, pr.Number, pr.Number, reviewers))
 		if strings.Contains(searchText, filter) {
 			m.filtered = append(m.filtered, pr)
 		}
@@ -588,6 +614,13 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "r":
+		if currentUser != "" {
+			m.filterText = "@" + currentUser
+			m.applyFilter()
+		}
+		return m, nil
+
 	case "/":
 		m.filterMode = true
 		m.filterText = ""
@@ -606,6 +639,15 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			pr := m.filtered[m.cursor]
 			url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
 			exec.Command("open", url).Start()
+		}
+		return m, nil
+
+	case "O":
+		for _, pr := range m.filtered {
+			if pr.ReviewDecision == "REVIEW_REQUIRED" {
+				url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
+				exec.Command("open", url).Start()
+			}
 		}
 		return m, nil
 	}
@@ -691,6 +733,25 @@ func getReviewer(pr PR) string {
 		return pr.Reviews.Nodes[0].Author.Login
 	}
 	return ""
+}
+
+func getAllReviewerNames(pr PR) string {
+	var names []string
+	for _, rr := range pr.ReviewRequests.Nodes {
+		name := rr.RequestedReviewer.Login
+		if name == "" {
+			name = rr.RequestedReviewer.Name
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	for _, r := range pr.Reviews.Nodes {
+		if r.Author.Login != "" {
+			names = append(names, r.Author.Login)
+		}
+	}
+	return strings.Join(names, " ")
 }
 
 func getDiffStats(pr PR) string {
@@ -864,7 +925,7 @@ func (m model) View() string {
 	}
 
 	s.WriteString("\n")
-	s.WriteString(helpStyle.Render(truncateToWidth("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter • o: open • enter: checkout • q/esc: quit", rowWidth)))
+	s.WriteString(helpStyle.Render(truncateToWidth("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter (@user) • r: my reviews • o/O: open/open all • enter: checkout • q/esc: quit", rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()
@@ -971,6 +1032,11 @@ func main() {
 				os.Exit(1)
 			}
 		}
+	}
+
+	// Fetch current GitHub user for "my reviews" toggle
+	if !demoMode {
+		currentUser = getCurrentUser()
 	}
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())

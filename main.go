@@ -621,6 +621,10 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "R":
+		m.refreshing = true
+		return m, tea.Batch(fetchPRs, spinnerTick())
+
 	case "/":
 		m.filterMode = true
 		m.filterText = ""
@@ -638,16 +642,14 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
 			pr := m.filtered[m.cursor]
 			url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
-			exec.Command("open", url).Start()
+			exec.Command("open", "-g", url).Start()
 		}
 		return m, nil
 
 	case "O":
 		for _, pr := range m.filtered {
-			if pr.ReviewDecision == "REVIEW_REQUIRED" {
-				url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
-				exec.Command("open", url).Start()
-			}
+			url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
+			exec.Command("open", "-g", url).Start()
 		}
 		return m, nil
 	}
@@ -925,7 +927,7 @@ func (m model) View() string {
 	}
 
 	s.WriteString("\n")
-	s.WriteString(helpStyle.Render(truncateToWidth("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter (@user) • r: my reviews • o/O: open/open all • enter: checkout • q/esc: quit", rowWidth)))
+	s.WriteString(helpStyle.Render(truncateToWidth("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter (@user) • r/R: my reviews/refresh • o/O: open/open all • enter: checkout • q/esc: quit", rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()

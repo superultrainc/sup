@@ -1,7 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="sup-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="sup.png">
-  <img alt="sup" src="sup.png" width="200">
+  <source media="(prefers-color-scheme: dark)" srcset="sup-negative.svg">
+  <img alt="sup" src="sup-positive.svg" width="200">
 </picture>
 
 [![Go](https://img.shields.io/badge/Go-1.21-00ADD8?logo=go&logoColor=white)](https://go.dev)
@@ -12,7 +11,6 @@ A terminal UI for browsing and checking out GitHub PRs.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="screenshot-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="screenshot-light.png">
   <img alt="sup screenshot" src="screenshot-light.png">
 </picture>
 

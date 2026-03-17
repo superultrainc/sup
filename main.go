@@ -555,12 +555,24 @@ func (m *model) applyFilter() {
 	filter := strings.ToLower(m.filterText)
 	m.filtered = nil
 
-	// @username prefix: match reviewer only
+	// @username prefix: match requested reviewers only
 	if strings.HasPrefix(filter, "@") {
 		userFilter := strings.TrimPrefix(filter, "@")
 		for _, pr := range m.prs {
-			reviewers := strings.ToLower(getAllReviewerNames(pr))
-			if reviewers != "" && strings.Contains(reviewers, userFilter) {
+			requested := strings.ToLower(getRequestedReviewerNames(pr))
+			if requested != "" && strings.Contains(requested, userFilter) {
+				m.filtered = append(m.filtered, pr)
+			}
+		}
+		m.cursor = 0
+		return
+	}
+
+	// !username prefix: match author only
+	if strings.HasPrefix(filter, "!") {
+		userFilter := strings.TrimPrefix(filter, "!")
+		for _, pr := range m.prs {
+			if strings.Contains(strings.ToLower(pr.Author.Login), userFilter) {
 				m.filtered = append(m.filtered, pr)
 			}
 		}
@@ -611,6 +623,13 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		if len(m.filtered) > 0 {
 			m.cursor = len(m.filtered) - 1
+		}
+		return m, nil
+
+	case "a":
+		if currentUser != "" {
+			m.filterText = "!" + currentUser
+			m.applyFilter()
 		}
 		return m, nil
 
@@ -735,6 +754,20 @@ func getReviewer(pr PR) string {
 		return pr.Reviews.Nodes[0].Author.Login
 	}
 	return ""
+}
+
+func getRequestedReviewerNames(pr PR) string {
+	var names []string
+	for _, rr := range pr.ReviewRequests.Nodes {
+		name := rr.RequestedReviewer.Login
+		if name == "" {
+			name = rr.RequestedReviewer.Name
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, " ")
 }
 
 func getAllReviewerNames(pr PR) string {
@@ -927,7 +960,7 @@ func (m model) View() string {
 	}
 
 	s.WriteString("\n")
-	s.WriteString(helpStyle.Render(truncateToWidth("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter (@user) • r/R: my reviews/refresh • o/O: open/open all • enter: checkout • q/esc: quit", rowWidth)))
+	s.WriteString(helpStyle.Render(truncateToWidth("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter (@user !author) • a: my PRs • r/R: my reviews/refresh • o/O: open/open all • enter: checkout • q/esc: quit", rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()

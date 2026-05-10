@@ -38,6 +38,43 @@ var defaultDevDirs = []string{
 	"",
 }
 
+func cacheDir() string {
+	dir := os.Getenv("XDG_CACHE_HOME")
+	if dir == "" {
+		dir = os.Getenv("HOME") + "/.cache"
+	}
+	dir = filepath.Join(dir, "sup")
+	os.MkdirAll(dir, 0755)
+	return dir
+}
+
+type metaCache struct {
+	Orgs        []string `json:"orgs"`
+	CurrentUser string   `json:"currentUser"`
+}
+
+func getMetaCachePath() string { return filepath.Join(cacheDir(), "meta.json") }
+
+func loadCachedMeta() (metaCache, bool) {
+	data, err := os.ReadFile(getMetaCachePath())
+	if err != nil {
+		return metaCache{}, false
+	}
+	var m metaCache
+	if err := json.Unmarshal(data, &m); err != nil {
+		return metaCache{}, false
+	}
+	return m, true
+}
+
+func saveCachedMeta(m metaCache) {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	os.WriteFile(getMetaCachePath(), data, 0644)
+}
+
 func getCacheFilePath() string {
 	cacheDir := os.Getenv("XDG_CACHE_HOME")
 	if cacheDir == "" {
@@ -161,6 +198,11 @@ type reviewSubmittedMsg struct {
 type prRefreshedMsg struct {
 	pr  PR
 	err error
+}
+
+type metaRefreshedMsg struct {
+	orgs        []string
+	currentUser string
 }
 
 type tickMsg struct{}
@@ -542,8 +584,26 @@ func startEditorCmd(action string, pr PR) (tea.Cmd, error) {
 	}), nil
 }
 
+func refreshMetaCmd() tea.Msg {
+	if demoMode {
+		return metaRefreshedMsg{orgs: orgs, currentUser: currentUser}
+	}
+	newOrgs := orgs
+	if !mineMode && os.Getenv("SUP_ORG") == "" {
+		if fetched, err := fetchUserOrgs(); err == nil && len(fetched) > 0 {
+			newOrgs = fetched
+		}
+	}
+	newUser := getCurrentUser()
+	if newUser == "" {
+		newUser = currentUser
+	}
+	saveCachedMeta(metaCache{Orgs: newOrgs, CurrentUser: newUser})
+	return metaRefreshedMsg{orgs: newOrgs, currentUser: newUser}
+}
+
 func (m model) Init() tea.Cmd {
-	return tea.Batch(fetchPRs, spinnerTick())
+	return tea.Batch(fetchPRs, refreshMetaCmd, spinnerTick())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -661,6 +721,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.actionStatus = fmt.Sprintf("✓ %s PR #%d", verb, msg.pr.Number)
 		// Refresh just this PR so its badge reflects the new review state.
 		return m, fetchSinglePRCmd(msg.pr)
+
+	case metaRefreshedMsg:
+		if len(msg.orgs) > 0 {
+			orgs = msg.orgs
+		}
+		if msg.currentUser != "" {
+			currentUser = msg.currentUser
+		}
+		return m, nil
 
 	case prRefreshedMsg:
 		if msg.err != nil {
@@ -1456,29 +1525,40 @@ func main() {
 	// In demo mode, skip org detection
 	if demoMode {
 		orgs = []string{"acme-corp"}
-	} else if !mineMode {
-		// Check for SUP_ORG override first
-		if orgEnv := os.Getenv("SUP_ORG"); orgEnv != "" {
-			orgs = strings.Split(orgEnv, ",")
+	} else if mineMode {
+		if meta, ok := loadCachedMeta(); ok && meta.CurrentUser != "" {
+			currentUser = meta.CurrentUser
 		} else {
-			// Auto-detect orgs from GitHub
-			var err error
-			orgs, err = fetchUserOrgs()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				fmt.Fprintln(os.Stderr, "Make sure you're logged in with: gh auth login")
-				os.Exit(1)
-			}
-			if len(orgs) == 0 {
-				fmt.Fprintln(os.Stderr, "No organizations found. Use --mine to see your PRs, or set SUP_ORG.")
-				os.Exit(1)
-			}
+			currentUser = getCurrentUser()
+			saveCachedMeta(metaCache{CurrentUser: currentUser})
 		}
-	}
-
-	// Fetch current GitHub user for "my reviews" toggle
-	if !demoMode {
+	} else if orgEnv := os.Getenv("SUP_ORG"); orgEnv != "" {
+		orgs = strings.Split(orgEnv, ",")
+		if meta, ok := loadCachedMeta(); ok && meta.CurrentUser != "" {
+			currentUser = meta.CurrentUser
+		} else {
+			currentUser = getCurrentUser()
+			saveCachedMeta(metaCache{Orgs: orgs, CurrentUser: currentUser})
+		}
+	} else if meta, ok := loadCachedMeta(); ok && len(meta.Orgs) > 0 {
+		// Fast path: cached orgs + user. Background refresh runs after the TUI starts.
+		orgs = meta.Orgs
+		currentUser = meta.CurrentUser
+	} else {
+		// First run — block on org/user lookup so we have something to query.
+		var err error
+		orgs, err = fetchUserOrgs()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintln(os.Stderr, "Make sure you're logged in with: gh auth login")
+			os.Exit(1)
+		}
+		if len(orgs) == 0 {
+			fmt.Fprintln(os.Stderr, "No organizations found. Use --mine to see your PRs, or set SUP_ORG.")
+			os.Exit(1)
+		}
 		currentUser = getCurrentUser()
+		saveCachedMeta(metaCache{Orgs: orgs, CurrentUser: currentUser})
 	}
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())

@@ -17,6 +17,7 @@ A terminal UI for browsing and checking out GitHub PRs.
 ## Requirements
 
 - [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`)
+- [hunk](https://github.com/modem-dev/hunk) (optional, for the `d` keybinding): `npm i -g hunkdiff`
 
 ## Install
 
@@ -64,7 +65,12 @@ Select a PR and press Enter to check it out locally.
 | `r` | Filter to your review requests |
 | `o` | Open PR in browser |
 | `O` | Open all PRs needing review in browser |
+| `d` | Review PR diff with [hunk](https://github.com/modem-dev/hunk) (split by default; press `1`/`2`/`0` inside hunk to flip layout) |
+| `A` | Approve PR (with `y`/`n` confirm) |
+| `D` | Request changes — opens `$EDITOR` for body |
+| `C` | Comment on PR — opens `$EDITOR` for body |
 | `Enter` | Checkout PR |
+| `?` | Toggle full help overlay |
 | `q` / `Esc` | Quit |
 
 ## Configuration (optional)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -118,12 +119,47 @@ type model struct {
 	height       int
 	loading      bool
 	refreshing   bool // true when fetching new data while showing cached data
-	visibleCount int  // for animation
-	spinnerFrame int  // for loading spinner
+	loadingDiff   bool // true while fetching diff before launching hunk
+	diffError     string
+	confirmAction string // non-empty while awaiting y/n confirmation (e.g. "approve")
+	confirmPR     *PR
+	actionPending bool   // true while a review submission is in flight
+	actionStatus  string // transient success/error feedback for review actions
+	helpMode      bool   // true while the help overlay is showing
+	visibleCount  int    // for animation
+	spinnerFrame  int    // for loading spinner
 }
 
 type prsLoadedMsg struct {
 	prs []PR
+	err error
+}
+
+type diffFetchedMsg struct {
+	patch []byte
+	mode  string // "split" or "stack" — passed through to hunk via --mode
+	err   error
+}
+
+type hunkDoneMsg struct {
+	err error
+}
+
+type editorDoneMsg struct {
+	action string
+	pr     PR
+	body   string
+	err    error
+}
+
+type reviewSubmittedMsg struct {
+	action string
+	pr     PR
+	err    error
+}
+
+type prRefreshedMsg struct {
+	pr  PR
 	err error
 }
 
@@ -395,6 +431,117 @@ func fetchPRs() tea.Msg {
 	return prsLoadedMsg{prs: resp.Data.Search.Nodes}
 }
 
+func fetchDiffCmd(pr PR, mode string) tea.Cmd {
+	return func() tea.Msg {
+		repoSlug := fmt.Sprintf("%s/%s", pr.Repository.Owner.Login, pr.Repository.Name)
+		cmd := exec.Command("gh", "pr", "diff", fmt.Sprintf("%d", pr.Number), "--repo", repoSlug)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = err.Error()
+			}
+			return diffFetchedMsg{mode: mode, err: fmt.Errorf("%s", msg)}
+		}
+		return diffFetchedMsg{patch: out, mode: mode}
+	}
+}
+
+func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
+	return func() tea.Msg {
+		repoSlug := fmt.Sprintf("%s/%s", pr.Repository.Owner.Login, pr.Repository.Name)
+		args := []string{"pr", "review", fmt.Sprintf("%d", pr.Number), "--repo", repoSlug}
+		switch action {
+		case "approve":
+			args = append(args, "--approve")
+		case "request-changes":
+			args = append(args, "--request-changes", "--body", body)
+		case "comment":
+			args = append(args, "--comment", "--body", body)
+		}
+		cmd := exec.Command("gh", args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = err.Error()
+			}
+			return reviewSubmittedMsg{action: action, pr: pr, err: fmt.Errorf("%s", msg)}
+		}
+		return reviewSubmittedMsg{action: action, pr: pr}
+	}
+}
+
+func fetchSinglePRCmd(pr PR) tea.Cmd {
+	return func() tea.Msg {
+		query := fmt.Sprintf(`{
+			repository(owner: "%s", name: "%s") {
+				pullRequest(number: %d) {
+					number
+					title
+					headRefName
+					isDraft
+					additions
+					deletions
+					author { login }
+					reviewDecision
+					reviewRequests(first: 5) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
+					reviews(last: 5) { nodes { author { login } state } }
+				}
+			}
+		}`, pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
+
+		cmd := exec.Command("gh", "api", "graphql", "-f", "query="+query)
+		out, err := cmd.Output()
+		if err != nil {
+			return prRefreshedMsg{err: err}
+		}
+		var resp struct {
+			Data struct {
+				Repository struct {
+					PullRequest PR `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(out, &resp); err != nil {
+			return prRefreshedMsg{err: err}
+		}
+		// GraphQL response doesn't include repository under pullRequest, restore it.
+		updated := resp.Data.Repository.PullRequest
+		updated.Repository = pr.Repository
+		return prRefreshedMsg{pr: updated}
+	}
+}
+
+func startEditorCmd(action string, pr PR) (tea.Cmd, error) {
+	f, err := os.CreateTemp("", fmt.Sprintf("sup-review-%d-*.md", pr.Number))
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := f.Name()
+	f.Close()
+
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vi"
+	}
+	editorCmd := exec.Command(editor, tmpPath)
+	return tea.ExecProcess(editorCmd, func(err error) tea.Msg {
+		defer os.Remove(tmpPath)
+		if err != nil {
+			return editorDoneMsg{action: action, pr: pr, err: err}
+		}
+		body, readErr := os.ReadFile(tmpPath)
+		if readErr != nil {
+			return editorDoneMsg{action: action, pr: pr, err: readErr}
+		}
+		return editorDoneMsg{action: action, pr: pr, body: strings.TrimSpace(string(body))}
+	}), nil
+}
+
 func (m model) Init() tea.Cmd {
 	return tea.Batch(fetchPRs, spinnerTick())
 }
@@ -478,15 +625,124 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		if m.loading || m.refreshing {
+		if m.loading || m.refreshing || m.loadingDiff || m.actionPending {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
 			return m, spinnerTick()
 		}
 		return m, nil
 
+	case editorDoneMsg:
+		if msg.err != nil {
+			m.actionStatus = "Error: " + msg.err.Error()
+			return m, nil
+		}
+		if msg.body == "" {
+			m.actionStatus = fmt.Sprintf("%s cancelled (empty body)", msg.action)
+			return m, nil
+		}
+		m.actionPending = true
+		return m, tea.Batch(submitReviewCmd(msg.action, msg.pr, msg.body), spinnerTick())
+
+	case reviewSubmittedMsg:
+		m.actionPending = false
+		if msg.err != nil {
+			m.actionStatus = "Error: " + msg.err.Error()
+			return m, nil
+		}
+		var verb string
+		switch msg.action {
+		case "approve":
+			verb = "Approved"
+		case "request-changes":
+			verb = "Requested changes on"
+		case "comment":
+			verb = "Commented on"
+		}
+		m.actionStatus = fmt.Sprintf("✓ %s PR #%d", verb, msg.pr.Number)
+		// Refresh just this PR so its badge reflects the new review state.
+		return m, fetchSinglePRCmd(msg.pr)
+
+	case prRefreshedMsg:
+		if msg.err != nil {
+			// Best-effort; leave the list alone on failure.
+			return m, nil
+		}
+		for i := range m.prs {
+			if m.prs[i].Number == msg.pr.Number &&
+				m.prs[i].Repository.Name == msg.pr.Repository.Name &&
+				m.prs[i].Repository.Owner.Login == msg.pr.Repository.Owner.Login {
+				m.prs[i] = msg.pr
+				break
+			}
+		}
+		// Preserve cursor across the filter rebuild.
+		var selectedPRNumber int
+		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+			selectedPRNumber = m.filtered[m.cursor].Number
+		}
+		if m.filterText != "" {
+			m.applyFilter()
+		} else {
+			m.filtered = m.prs
+		}
+		if selectedPRNumber > 0 {
+			for i, pr := range m.filtered {
+				if pr.Number == selectedPRNumber {
+					m.cursor = i
+					break
+				}
+			}
+		}
+		if m.cursor >= len(m.filtered) {
+			m.cursor = len(m.filtered) - 1
+		}
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		if !demoMode {
+			savePRsToCache(m.prs)
+		}
+		return m, nil
+
+	case diffFetchedMsg:
+		m.loadingDiff = false
+		if msg.err != nil {
+			m.diffError = msg.err.Error()
+			return m, nil
+		}
+		args := []string{"patch"}
+		if msg.mode != "" {
+			args = append(args, "--mode", msg.mode)
+		}
+		args = append(args, "-")
+		hunk := exec.Command("hunk", args...)
+		hunk.Stdin = bytes.NewReader(msg.patch)
+		return m, tea.ExecProcess(hunk, func(err error) tea.Msg {
+			return hunkDoneMsg{err: err}
+		})
+
+	case hunkDoneMsg:
+		if msg.err != nil {
+			m.diffError = fmt.Sprintf("hunk error: %v", msg.err)
+		}
+		return m, nil
+
 	case tea.KeyMsg:
-		// Allow quitting even during animation (ctrl+c always quits)
-		if msg.String() == "q" || msg.String() == "ctrl+c" {
+		// ctrl+c always quits, even from the help overlay.
+		if msg.String() == "ctrl+c" {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		// In help overlay, only ?/esc/q dismiss; everything else is ignored.
+		if m.helpMode {
+			switch msg.String() {
+			case "?", "esc", "q":
+				m.helpMode = false
+			}
+			return m, nil
+		}
+		// Allow quitting even during animation
+		if msg.String() == "q" {
 			m.quitting = true
 			return m, tea.Quit
 		}
@@ -498,8 +754,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.filterMode {
 			return m.handleFilterInput(msg)
 		}
-		// Allow esc to quit only when not filtering
+		// Esc clears an active filter first; only quits when nothing to clear.
 		if msg.String() == "esc" {
+			if m.filterText != "" {
+				m.filterText = ""
+				m.applyFilter()
+				return m, nil
+			}
 			m.quitting = true
 			return m, tea.Quit
 		}
@@ -595,15 +856,29 @@ func (m *model) applyFilter() {
 }
 
 func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Confirmation prompts intercept input before any other handling.
+	if m.confirmAction != "" {
+		switch msg.String() {
+		case "y", "Y":
+			action := m.confirmAction
+			pr := *m.confirmPR
+			m.confirmAction = ""
+			m.confirmPR = nil
+			m.actionPending = true
+			m.actionStatus = ""
+			return m, tea.Batch(submitReviewCmd(action, pr, ""), spinnerTick())
+		default:
+			m.confirmAction = ""
+			m.confirmPR = nil
+		}
+		return m, nil
+	}
+
+	// Any key dismisses transient feedback from a previous action.
+	m.diffError = ""
+	m.actionStatus = ""
+
 	switch msg.String() {
-	case "q", "ctrl+c":
-		m.quitting = true
-		return m, tea.Quit
-
-	case "esc":
-		m.quitting = true
-		return m, tea.Quit
-
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -649,11 +924,69 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filterText = ""
 		return m, nil
 
+	case "?":
+		m.helpMode = true
+		return m, nil
+
 	case "enter":
 		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
 			m.selected = &m.filtered[m.cursor]
 			m.quitting = true
 			return m, tea.Quit
+		}
+		return m, nil
+
+	case "d":
+		if m.loadingDiff {
+			return m, nil
+		}
+		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+			if _, err := exec.LookPath("hunk"); err != nil {
+				m.diffError = "hunk not installed — npm i -g hunkdiff"
+				return m, nil
+			}
+			m.diffError = ""
+			m.loadingDiff = true
+			return m, tea.Batch(fetchDiffCmd(m.filtered[m.cursor], "split"), spinnerTick())
+		}
+		return m, nil
+
+	case "A":
+		if m.actionPending || m.loadingDiff {
+			return m, nil
+		}
+		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+			pr := m.filtered[m.cursor]
+			m.confirmAction = "approve"
+			m.confirmPR = &pr
+		}
+		return m, nil
+
+	case "D":
+		if m.actionPending || m.loadingDiff {
+			return m, nil
+		}
+		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+			cmd, err := startEditorCmd("request-changes", m.filtered[m.cursor])
+			if err != nil {
+				m.actionStatus = "Error: " + err.Error()
+				return m, nil
+			}
+			return m, cmd
+		}
+		return m, nil
+
+	case "C":
+		if m.actionPending || m.loadingDiff {
+			return m, nil
+		}
+		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+			cmd, err := startEditorCmd("comment", m.filtered[m.cursor])
+			if err != nil {
+				m.actionStatus = "Error: " + err.Error()
+				return m, nil
+			}
+			return m, cmd
 		}
 		return m, nil
 
@@ -795,7 +1128,64 @@ func getDiffStats(pr PR) string {
 	return fmt.Sprintf("%s %s", adds, dels)
 }
 
+func (m model) helpView() string {
+	var s strings.Builder
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	sections := []struct {
+		title string
+		items [][2]string
+	}{
+		{"Navigation", [][2]string{
+			{"j / ↓", "Move down"},
+			{"k / ↑", "Move up"},
+			{"g / G", "Top / bottom"},
+		}},
+		{"Filter", [][2]string{
+			{"/", "Open filter"},
+			{"@user", "Filter by reviewer"},
+			{"!user", "Filter by author"},
+			{"a", "My PRs"},
+			{"r", "My reviews"},
+		}},
+		{"Actions", [][2]string{
+			{"Enter", "Checkout PR"},
+			{"d", "Review diff (hunk: 1=split · 2=stack · 0=auto)"},
+			{"A", "Approve"},
+			{"D", "Request changes"},
+			{"C", "Comment"},
+			{"o", "Open in browser"},
+			{"O", "Open all needing review"},
+		}},
+		{"Other", [][2]string{
+			{"R", "Refresh PR list"},
+			{"?", "Toggle this help"},
+			{"esc", "Clear filter (or quit)"},
+			{"q", "Quit"},
+		}},
+	}
+
+	const keyCol = 12
+	s.WriteString("\n  " + headerStyle.Render("sup — keybindings") + "\n\n")
+	for _, sec := range sections {
+		s.WriteString("  " + sectionStyle.Render(sec.title) + "\n")
+		for _, item := range sec.items {
+			s.WriteString("    " + keyStyle.Render(pad(item[0], keyCol)) + descStyle.Render(item[1]) + "\n")
+		}
+		s.WriteString("\n")
+	}
+	s.WriteString("  " + dimStyle.Render("? · esc · q to close") + "\n")
+	return s.String()
+}
+
 func (m model) View() string {
+	if m.helpMode {
+		return m.helpView()
+	}
 	var s strings.Builder
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	loadingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
@@ -835,9 +1225,21 @@ func (m model) View() string {
 	} else if m.filterText != "" {
 		filterLine = fmt.Sprintf("  Filter: %s", m.filterText)
 	}
-	if filterLine == "  " {
+	switch {
+	case m.actionPending:
+		spinner := spinnerFrames[m.spinnerFrame]
+		s.WriteString(loadingStyle.Render("  " + spinner + " Submitting review..."))
+	case m.actionStatus != "":
+		style := approvedStyle
+		if strings.HasPrefix(m.actionStatus, "Error") || strings.Contains(m.actionStatus, "cancelled") {
+			style = changesRequestedStyle
+		}
+		s.WriteString(style.Render("  " + m.actionStatus))
+	case m.diffError != "":
+		s.WriteString(changesRequestedStyle.Render("  " + m.diffError))
+	case filterLine == "  ":
 		s.WriteString(filterLine)
-	} else {
+	default:
 		s.WriteString(filterStyle.Render(filterLine))
 	}
 	s.WriteString("\n")
@@ -953,14 +1355,19 @@ func (m model) View() string {
 		} else {
 			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))
 		}
-		if m.refreshing {
+		if m.confirmAction == "approve" && m.confirmPR != nil {
+			s.WriteString(filterStyle.Render(fmt.Sprintf("  Approve PR #%d? (y/n)", m.confirmPR.Number)))
+		} else if m.refreshing {
 			spinner := spinnerFrames[m.spinnerFrame]
 			s.WriteString(loadingStyle.Render("  " + spinner + " Refreshing"))
+		} else if m.loadingDiff {
+			spinner := spinnerFrames[m.spinnerFrame]
+			s.WriteString(loadingStyle.Render("  " + spinner + " Loading diff..."))
 		}
 	}
 
 	s.WriteString("\n")
-	s.WriteString(helpStyle.Render(truncateToWidth("  j/k ↑/↓: navigate • g/G: top/bottom • /: filter (@user !author) • a: my PRs • r/R: my reviews/refresh • o/O: open/open all • enter: checkout • q/esc: quit", rowWidth)))
+	s.WriteString(helpStyle.Render(truncateToWidth("  ?: help · /: filter · enter: checkout · q: quit", rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()

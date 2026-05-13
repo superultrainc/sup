@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +22,91 @@ var (
 	mineMode    bool     // Show PRs involving current user
 	demoMode    bool     // Show mock data for screenshots
 	currentUser string   // Authenticated GitHub username
+	ghToken     string   // Cached `gh auth token` for direct HTTP calls
+
+	httpClient = &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        20,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
 )
+
+func tokenCachePath() string { return filepath.Join(cacheDir(), "token") }
+
+func loadGHToken() error {
+	if data, err := os.ReadFile(tokenCachePath()); err == nil {
+		if t := strings.TrimSpace(string(data)); t != "" {
+			ghToken = t
+			return nil
+		}
+	}
+	return refreshGHToken()
+}
+
+func refreshGHToken() error {
+	out, err := exec.Command("gh", "auth", "token").Output()
+	if err != nil {
+		return err
+	}
+	t := strings.TrimSpace(string(out))
+	if t == "" {
+		return fmt.Errorf("empty token from gh auth token")
+	}
+	ghToken = t
+	_ = os.WriteFile(tokenCachePath(), []byte(t), 0600)
+	return nil
+}
+
+func invalidateGHToken() {
+	_ = os.Remove(tokenCachePath())
+	ghToken = ""
+}
+
+func graphqlPOST(query string) ([]byte, error) {
+	data, status, err := graphqlPOSTOnce(query)
+	if err != nil {
+		return nil, err
+	}
+	// Token may have rotated since we cached it — refresh once and retry.
+	if status == 401 {
+		invalidateGHToken()
+		if err := refreshGHToken(); err != nil {
+			return nil, fmt.Errorf("auth refresh failed: %w", err)
+		}
+		data, status, err = graphqlPOSTOnce(query)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("graphql %d: %s", status, strings.TrimSpace(string(data)))
+	}
+	return data, nil
+}
+
+func graphqlPOSTOnce(query string) ([]byte, int, error) {
+	body, _ := json.Marshal(map[string]string{"query": query})
+	req, err := http.NewRequest("POST", "https://api.github.com/graphql", bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+ghToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return data, resp.StatusCode, nil
+}
 
 // Output file for shell integration (shell wrapper reads this to cd)
 const selectionFile = "/tmp/sup-selection"
@@ -165,11 +251,22 @@ type model struct {
 	helpMode      bool   // true while the help overlay is showing
 	visibleCount  int    // for animation
 	spinnerFrame  int    // for loading spinner
+	refreshSeen   map[string]bool // PR keys seen during the in-flight refresh
+	refreshID     int             // increments each refresh; stale page messages are dropped
+	pendingShards int             // shards still streaming pages for the current refresh
 }
 
-type prsLoadedMsg struct {
-	prs []PR
-	err error
+type prPageLoadedMsg struct {
+	prs       []PR
+	endCursor string
+	hasNext   bool
+	shardIdx  int
+	refreshID int
+	err       error
+}
+
+func prKey(pr PR) string {
+	return fmt.Sprintf("%s/%s#%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
 }
 
 type diffFetchedMsg struct {
@@ -341,14 +438,6 @@ func initialModel() model {
 	}
 }
 
-type graphQLResponse struct {
-	Data struct {
-		Search struct {
-			Nodes []PR `json:"nodes"`
-		} `json:"search"`
-	} `json:"data"`
-}
-
 func mockPRs() []PR {
 	mockJSON := `[
 		{"number": 142, "title": "Add user authentication flow", "headRefName": "feature/auth-flow", "isDraft": false, "additions": 847, "deletions": 123, "author": {"login": "sarah"}, "repository": {"name": "backend-api", "owner": {"login": "acme-corp"}}, "reviewDecision": "APPROVED", "reviews": {"nodes": [{"author": {"login": "mike"}, "state": "APPROVED"}]}},
@@ -421,56 +510,112 @@ func fetchUserOrgs() ([]string, error) {
 	return result, nil
 }
 
-func fetchPRs() tea.Msg {
-	if demoMode {
-		return prsLoadedMsg{prs: mockPRs()}
-	}
-
-	// Build the search query
-	var searchQuery string
+func searchShards() []string {
 	if mineMode {
-		searchQuery = "involves:@me is:pr is:open"
-	} else {
-		// Build org query: org:foo org:bar ...
-		var orgParts []string
-		for _, org := range orgs {
-			orgParts = append(orgParts, "org:"+org)
-		}
-		searchQuery = strings.Join(orgParts, " ") + " is:pr is:open"
+		return []string{"involves:@me is:pr is:open"}
 	}
+	var s []string
+	for _, o := range orgs {
+		s = append(s, "org:"+o+" is:pr is:open")
+	}
+	return s
+}
 
-	query := fmt.Sprintf(`{
-		search(query: "%s", type: ISSUE, first: 100) {
-			nodes {
-				... on PullRequest {
-					number
-					title
-					headRefName
-					isDraft
-					additions
-					deletions
-					author { login }
-					repository { name owner { login } }
-					reviewDecision
-					reviewRequests(first: 5) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
-					reviews(last: 5) { nodes { author { login } state } }
+func fetchShardPage(shardIdx int, after string, refreshID int) tea.Cmd {
+	return func() tea.Msg {
+		if demoMode {
+			return prPageLoadedMsg{prs: mockPRs(), shardIdx: shardIdx, refreshID: refreshID}
+		}
+
+		shards := searchShards()
+		if shardIdx >= len(shards) {
+			return prPageLoadedMsg{shardIdx: shardIdx, refreshID: refreshID}
+		}
+
+		afterArg := "null"
+		if after != "" {
+			afterArg = `"` + after + `"`
+		}
+
+		query := fmt.Sprintf(`{
+			search(query: "%s", type: ISSUE, first: 50, after: %s) {
+				pageInfo { endCursor hasNextPage }
+				nodes {
+					... on PullRequest {
+						number
+						title
+						headRefName
+						isDraft
+						additions
+						deletions
+						author { login }
+						repository { name owner { login } }
+						reviewDecision
+						reviewRequests(first: 5) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
+						reviews(last: 5) { nodes { author { login } state } }
+					}
 				}
 			}
+		}`, shards[shardIdx], afterArg)
+
+		output, err := graphqlPOST(query)
+		if err != nil {
+			return prPageLoadedMsg{shardIdx: shardIdx, refreshID: refreshID, err: fmt.Errorf("failed to fetch PRs: %w", err)}
 		}
-	}`, searchQuery)
 
-	cmd := exec.Command("gh", "api", "graphql", "-f", "query="+query)
-	output, err := cmd.Output()
-	if err != nil {
-		return prsLoadedMsg{err: fmt.Errorf("failed to fetch PRs: %w", err)}
+		var resp struct {
+			Data struct {
+				Search struct {
+					PageInfo struct {
+						EndCursor   string `json:"endCursor"`
+						HasNextPage bool   `json:"hasNextPage"`
+					} `json:"pageInfo"`
+					Nodes []PR `json:"nodes"`
+				} `json:"search"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(output, &resp); err != nil {
+			return prPageLoadedMsg{shardIdx: shardIdx, refreshID: refreshID, err: fmt.Errorf("failed to parse PRs: %w", err)}
+		}
+
+		return prPageLoadedMsg{
+			prs:       resp.Data.Search.Nodes,
+			endCursor: resp.Data.Search.PageInfo.EndCursor,
+			hasNext:   resp.Data.Search.PageInfo.HasNextPage,
+			shardIdx:  shardIdx,
+			refreshID: refreshID,
+		}
+	}
+}
+
+// startRefresh resets refresh state on the model and returns the batch of
+// commands that drive the parallel fan-out: one chain per search shard plus
+// one batched-aliases GraphQL request per chunk of already-cached PRs.
+func (m *model) startRefresh() tea.Cmd {
+	m.refreshID++
+	m.refreshSeen = make(map[string]bool)
+	shards := searchShards()
+	if len(shards) == 0 {
+		m.refreshing = false
+		return nil
+	}
+	m.pendingShards = len(shards)
+	cmds := make([]tea.Cmd, 0, len(shards)+4)
+	for i := range shards {
+		cmds = append(cmds, fetchShardPage(i, "", m.refreshID))
 	}
 
-	var resp graphQLResponse
-	if err := json.Unmarshal(output, &resp); err != nil {
-		return prsLoadedMsg{err: fmt.Errorf("failed to parse PRs: %w", err)}
+	// Fast path: fire one request per cached PR. tea.Batch runs them as
+	// concurrent goroutines, so each row updates the moment its response
+	// arrives (HTTP/2 multiplexes them over a single connection).
+	if !demoMode {
+		for _, p := range m.prs {
+			cmds = append(cmds, fetchSinglePRCmd(p))
+		}
 	}
 
-	return prsLoadedMsg{prs: resp.Data.Search.Nodes}
+	cmds = append(cmds, spinnerTick())
+	return tea.Batch(cmds...)
 }
 
 func fetchDiffCmd(pr PR, mode string) tea.Cmd {
@@ -536,8 +681,7 @@ func fetchSinglePRCmd(pr PR) tea.Cmd {
 			}
 		}`, pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
 
-		cmd := exec.Command("gh", "api", "graphql", "-f", "query="+query)
-		out, err := cmd.Output()
+		out, err := graphqlPOST(query)
 		if err != nil {
 			return prRefreshedMsg{err: err}
 		}
@@ -551,7 +695,6 @@ func fetchSinglePRCmd(pr PR) tea.Cmd {
 		if err := json.Unmarshal(out, &resp); err != nil {
 			return prRefreshedMsg{err: err}
 		}
-		// GraphQL response doesn't include repository under pullRequest, restore it.
 		updated := resp.Data.Repository.PullRequest
 		updated.Repository = pr.Repository
 		return prRefreshedMsg{pr: updated}
@@ -602,8 +745,10 @@ func refreshMetaCmd() tea.Msg {
 	return metaRefreshedMsg{orgs: newOrgs, currentUser: newUser}
 }
 
+type startRefreshMsg struct{}
+
 func (m model) Init() tea.Cmd {
-	return tea.Batch(fetchPRs, refreshMetaCmd, spinnerTick())
+	return tea.Batch(func() tea.Msg { return startRefreshMsg{} }, refreshMetaCmd)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -613,38 +758,79 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 
-	case prsLoadedMsg:
+	case startRefreshMsg:
+		return m, m.startRefresh()
+
+	case prPageLoadedMsg:
+		// Stale message from a prior refresh — ignore.
+		if msg.refreshID != m.refreshID {
+			return m, nil
+		}
 		if msg.err != nil {
-			m.err = msg.err
-			m.loading = false
-			m.refreshing = false
+			if len(m.prs) == 0 {
+				m.err = msg.err
+			}
+			m.pendingShards--
+			if m.pendingShards <= 0 {
+				m.refreshing = false
+				m.loading = false
+			}
 			return m, nil
 		}
 
-		// Sort PRs oldest first
-		sortPRsByOldestFirst(msg.prs)
-
-		// Save to cache (skip in demo mode)
-		if !demoMode {
-			savePRsToCache(msg.prs)
-		}
-
-		// Preserve selection by finding the same PR in the new list
 		var selectedPRNumber int
 		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
 			selectedPRNumber = m.filtered[m.cursor].Number
 		}
 
-		m.prs = msg.prs
+		for _, np := range msg.prs {
+			key := prKey(np)
+			m.refreshSeen[key] = true
+			found := false
+			for i := range m.prs {
+				if prKey(m.prs[i]) == key {
+					m.prs[i] = np
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.prs = append(m.prs, np)
+			}
+		}
 
-		// Re-apply filter if active
+		// If this shard has more pages, fire the next page now (don't wait for
+		// other shards). Otherwise this shard is done.
+		var next tea.Cmd
+		if msg.hasNext {
+			next = fetchShardPage(msg.shardIdx, msg.endCursor, msg.refreshID)
+		} else {
+			m.pendingShards--
+		}
+
+		// When every shard has finished, prune PRs not seen this refresh and persist.
+		if m.pendingShards <= 0 && !msg.hasNext {
+			kept := m.prs[:0]
+			for _, pr := range m.prs {
+				if m.refreshSeen[prKey(pr)] {
+					kept = append(kept, pr)
+				}
+			}
+			m.prs = kept
+			if !demoMode {
+				savePRsToCache(m.prs)
+			}
+			m.refreshing = false
+		}
+
+		sortPRsByOldestFirst(m.prs)
+
 		if m.filterText != "" {
 			m.applyFilter()
 		} else {
-			m.filtered = msg.prs
+			m.filtered = m.prs
 		}
 
-		// Restore cursor position to the same PR if it still exists
 		if selectedPRNumber > 0 {
 			for i, pr := range m.filtered {
 				if pr.Number == selectedPRNumber {
@@ -653,8 +839,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-
-		// Clamp cursor to valid range
 		if m.cursor >= len(m.filtered) {
 			m.cursor = len(m.filtered) - 1
 		}
@@ -662,17 +846,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 		}
 
-		wasRefreshing := m.refreshing
 		m.loading = false
-		m.refreshing = false
-
-		// Only animate if we weren't showing cached data
-		if !wasRefreshing {
-			m.visibleCount = 0
-			return m, tick()
-		}
 		m.visibleCount = len(m.filtered)
-		return m, nil
+
+		return m, next
 
 	case tickMsg:
 		if m.visibleCount < len(m.filtered) {
@@ -986,7 +1163,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "R":
 		m.refreshing = true
-		return m, tea.Batch(fetchPRs, spinnerTick())
+		return m, m.startRefresh()
 
 	case "/":
 		m.filterMode = true
@@ -1519,6 +1696,14 @@ func main() {
 			demoMode = true
 		case "--mine", "-m":
 			mineMode = true
+		}
+	}
+
+	// Load gh auth token once for direct GraphQL HTTP calls.
+	if !demoMode {
+		if err := loadGHToken(); err != nil {
+			fmt.Fprintln(os.Stderr, "Error: failed to read gh auth token. Run: gh auth login")
+			os.Exit(1)
 		}
 	}
 

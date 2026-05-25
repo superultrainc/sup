@@ -1222,7 +1222,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "C":
+	case "M":
 		if m.actionPending || m.loadingDiff {
 			return m, nil
 		}
@@ -1241,6 +1241,20 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			pr := m.filtered[m.cursor]
 			url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
 			exec.Command("open", "-g", url).Start()
+		}
+		return m, nil
+
+	case "c":
+		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+			pr := m.filtered[m.cursor]
+			url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
+			cmd := exec.Command("pbcopy")
+			cmd.Stdin = strings.NewReader(url)
+			if err := cmd.Run(); err != nil {
+				m.actionStatus = "Error copying link: " + err.Error()
+			} else {
+				m.actionStatus = fmt.Sprintf("✓ Copied PR #%d link", pr.Number)
+			}
 		}
 		return m, nil
 
@@ -1403,9 +1417,10 @@ func (m model) helpView() string {
 			{"d", "Review diff (hunk: 1=split · 2=stack · 0=auto)"},
 			{"A", "Approve"},
 			{"D", "Request changes"},
-			{"C", "Comment"},
+			{"M", "Comment"},
 			{"o", "Open in browser"},
 			{"O", "Open all needing review"},
+			{"c", "Copy PR link"},
 		}},
 		{"Other", [][2]string{
 			{"R", "Refresh PR list"},

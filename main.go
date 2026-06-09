@@ -454,6 +454,26 @@ func mockPRs() []PR {
 	return prs
 }
 
+// findWorktreePath returns the path of a worktree checked out on the given branch, or "".
+// repoPath is the main worktree root; branch is the short branch name.
+func findWorktreePath(repoPath, branch string) string {
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	var currentPath string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			currentPath = strings.TrimPrefix(line, "worktree ")
+		} else if line == "branch refs/heads/"+branch && currentPath != "" {
+			return currentPath
+		}
+	}
+	return ""
+}
+
 // findRepoPath searches for a repo in common locations
 func findRepoPath(repoName string) string {
 	home := os.Getenv("HOME")
@@ -1785,23 +1805,30 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Change to repo directory and run gh pr checkout
-		if err := os.Chdir(repoPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: could not cd to %s: %v\n", repoPath, err)
-			os.Exit(1)
-		}
+		// Check if the branch is already checked out in a worktree
+		targetPath := repoPath
+		if wtPath := findWorktreePath(repoPath, pr.HeadRefName); wtPath != "" {
+			fmt.Printf("Branch '%s' already checked out at %s\n", pr.HeadRefName, wtPath)
+			targetPath = wtPath
+		} else {
+			// Change to repo directory and run gh pr checkout
+			if err := os.Chdir(repoPath); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: could not cd to %s: %v\n", repoPath, err)
+				os.Exit(1)
+			}
 
-		fmt.Printf("Checking out PR #%d in %s...\n", pr.Number, repoPath)
-		cmd := exec.Command("gh", "pr", "checkout", fmt.Sprintf("%d", pr.Number), "--force")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: gh pr checkout failed: %v\n", err)
-			os.Exit(1)
+			fmt.Printf("Checking out PR #%d in %s...\n", pr.Number, repoPath)
+			cmd := exec.Command("gh", "pr", "checkout", fmt.Sprintf("%d", pr.Number), "--force")
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: gh pr checkout failed: %v\n", err)
+				os.Exit(1)
+			}
 		}
 
 		// Write path for shell wrapper to cd into
-		os.WriteFile(selectionFile, []byte(repoPath), 0644)
+		os.WriteFile(selectionFile, []byte(targetPath), 0644)
 	} else {
 		// No selection - clean up any stale selection file
 		os.Remove(selectionFile)

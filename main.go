@@ -255,6 +255,7 @@ type model struct {
 	refreshID     int             // increments each refresh; stale page messages are dropped
 	pendingShards int             // shards still streaming pages for the current refresh
 	statusFilterIndex int          // current index in statusFilters array (-1 means no filter)
+	authorFilter  string          // author filter (e.g., "!username"), empty means no author filter
 }
 
 type prPageLoadedMsg struct {
@@ -428,6 +429,7 @@ func initialModel() model {
 				refreshing:        true,
 				visibleCount:      len(cached),
 				statusFilterIndex: -1,
+				authorFilter:      "",
 			}
 		}
 	}
@@ -438,6 +440,7 @@ func initialModel() model {
 		loading:           true,
 		visibleCount:      0,
 		statusFilterIndex: -1,
+		authorFilter:      "",
 	}
 }
 
@@ -1025,7 +1028,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Esc clears an active filter first; only quits when nothing to clear.
 		if msg.String() == "esc" {
-			if m.filterText != "" {
+			if m.authorFilter != "" || m.statusFilterIndex >= 0 || m.filterText != "" {
+				m.authorFilter = ""
+				m.statusFilterIndex = -1
 				m.filterText = ""
 				m.applyFilter()
 				return m, nil
@@ -1076,6 +1081,52 @@ func (m model) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) applyFilter() {
+	// If we have both author and status filters, apply them simultaneously
+	if m.authorFilter != "" && m.statusFilterIndex >= 0 {
+		m.filtered = nil
+		statusFilter := statusFilters[m.statusFilterIndex]
+			
+		// Parse author filter (e.g., "!username" or "@username")
+		authorPrefix := ""
+		authorName := m.authorFilter
+		if strings.HasPrefix(authorName, "!") {
+			authorPrefix = "!"
+			authorName = strings.TrimPrefix(authorName, "!")
+		} else if strings.HasPrefix(authorName, "@") {
+			authorPrefix = "@"
+			authorName = strings.TrimPrefix(authorName, "@")
+		}
+		authorName = strings.ToLower(authorName)
+		
+		for _, pr := range m.prs {
+			// Check author filter
+			authorMatch := false
+			if authorPrefix == "" {
+				// No author filter
+				authorMatch = true
+			} else if authorPrefix == "!" {
+				// Filter by author
+				authorMatch = strings.Contains(strings.ToLower(pr.Author.Login), authorName)
+			} else if authorPrefix == "@" {
+				// Filter by reviewer
+				requested := strings.ToLower(getRequestedReviewerNames(pr))
+				authorMatch = requested != "" && strings.Contains(requested, authorName)
+			}
+			
+			if !authorMatch {
+				continue
+			}
+			
+			// Check status filter
+			if statusLabelForFilter(pr) == statusFilter {
+				m.filtered = append(m.filtered, pr)
+			}
+		}
+		m.cursor = 0
+		return
+	}
+	
+	// Fall back to legacy behavior for backwards compatibility
 	if m.filterText == "" {
 		m.filtered = m.prs
 		m.cursor = 0
@@ -1189,14 +1240,26 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "a":
 		if currentUser != "" {
-			m.filterText = "!" + currentUser
+			if m.authorFilter == "!"+currentUser {
+				// Toggle off same filter
+				m.authorFilter = ""
+			} else {
+				// Set author filter
+				m.authorFilter = "!" + currentUser
+			}
 			m.applyFilter()
 		}
 		return m, nil
 
 	case "r":
 		if currentUser != "" {
-			m.filterText = "@" + currentUser
+			if m.authorFilter == "@"+currentUser {
+				// Toggle off same filter
+				m.authorFilter = ""
+			} else {
+				// Set reviewer filter
+				m.authorFilter = "@" + currentUser
+			}
 			m.applyFilter()
 		}
 		return m, nil
@@ -1315,10 +1378,16 @@ func (m *model) cycleStatusFilter() {
 	m.statusFilterIndex = (m.statusFilterIndex + 1) % (len(statusFilters) + 1)
 	if m.statusFilterIndex >= len(statusFilters) {
 		// Cycle back to no filter
-		m.filterText = ""
-		m.statusFilterIndex = -1
+		if m.authorFilter != "" {
+			// Keep only author filter
+			m.statusFilterIndex = -1
+		} else {
+			// Clear everything
+			m.filterText = ""
+			m.statusFilterIndex = -1
+		}
 	} else {
-		m.filterText = statusFilters[m.statusFilterIndex]
+		// Set status filter
 	}
 	m.applyFilter()
 }
@@ -1538,6 +1607,15 @@ func (m model) View() string {
 	filterLine := "  "
 	if m.filterMode {
 		filterLine = fmt.Sprintf("  / %s█", m.filterText)
+	} else if m.authorFilter != "" && m.statusFilterIndex >= 0 {
+		// Show both author and status filters
+		statusFilter := statusFilters[m.statusFilterIndex]
+		filterLine = fmt.Sprintf("  Filter: %s %s", m.authorFilter, statusFilter)
+	} else if m.authorFilter != "" {
+		filterLine = fmt.Sprintf("  Filter: %s", m.authorFilter)
+	} else if m.statusFilterIndex >= 0 {
+		statusFilter := statusFilters[m.statusFilterIndex]
+		filterLine = fmt.Sprintf("  Filter: %s", statusFilter)
 	} else if m.filterText != "" {
 		filterLine = fmt.Sprintf("  Filter: %s", m.filterText)
 	}

@@ -254,6 +254,7 @@ type model struct {
 	refreshSeen   map[string]bool // PR keys seen during the in-flight refresh
 	refreshID     int             // increments each refresh; stale page messages are dropped
 	pendingShards int             // shards still streaming pages for the current refresh
+	statusFilterIndex int          // current index in statusFilters array (-1 means no filter)
 }
 
 type prPageLoadedMsg struct {
@@ -420,21 +421,23 @@ func initialModel() model {
 		if cached != nil {
 			sortPRsByOldestFirst(cached)
 			return model{
-				prs:          cached,
-				filtered:     cached,
-				cursor:       0,
-				loading:      false,
-				refreshing:   true,
-				visibleCount: len(cached),
+				prs:               cached,
+				filtered:          cached,
+				cursor:            0,
+				loading:           false,
+				refreshing:        true,
+				visibleCount:      len(cached),
+				statusFilterIndex: -1,
 			}
 		}
 	}
 	return model{
-		prs:          []PR{},
-		filtered:     []PR{},
-		cursor:       0,
-		loading:      true,
-		visibleCount: 0,
+		prs:               []PR{},
+		filtered:          []PR{},
+		cursor:            0,
+		loading:           true,
+		visibleCount:      0,
+		statusFilterIndex: -1,
 	}
 }
 
@@ -1076,8 +1079,12 @@ func (m *model) applyFilter() {
 	if m.filterText == "" {
 		m.filtered = m.prs
 		m.cursor = 0
+		m.statusFilterIndex = -1
 		return
 	}
+
+	// Reset status filter index - will be updated if filter matches a status
+	m.statusFilterIndex = -1
 
 	filter := strings.ToLower(m.filterText)
 	m.filtered = nil
@@ -1105,6 +1112,13 @@ func (m *model) applyFilter() {
 		}
 		m.cursor = 0
 		return
+	}
+
+	// Check if filter matches a status filter
+	for i, status := range statusFilters {
+		if filter == status {
+			m.statusFilterIndex = i
+		}
 	}
 
 	// Default: search all fields including reviewer
@@ -1137,6 +1151,12 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.confirmAction = ""
 			m.confirmPR = nil
 		}
+		return m, nil
+	}
+
+	// Handle status filter cycling
+	if msg.String() == "s" {
+		m.cycleStatusFilter()
 		return m, nil
 	}
 
@@ -1289,6 +1309,20 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+var statusFilters = []string{"draft", "approved", "denied", "review", "commented", "open"}
+
+func (m *model) cycleStatusFilter() {
+	m.statusFilterIndex = (m.statusFilterIndex + 1) % (len(statusFilters) + 1)
+	if m.statusFilterIndex >= len(statusFilters) {
+		// Cycle back to no filter
+		m.filterText = ""
+		m.statusFilterIndex = -1
+	} else {
+		m.filterText = statusFilters[m.statusFilterIndex]
+	}
+	m.applyFilter()
+}
+
 func getStatusBadge(pr PR) string {
 	if pr.IsDraft {
 		return draftStyle.Render("[Draft]")
@@ -1427,6 +1461,7 @@ func (m model) helpView() string {
 		}},
 		{"Filter", [][2]string{
 			{"/", "Open filter"},
+			{"s", "Cycle status filter"},
 			{"@user", "Filter by reviewer"},
 			{"!user", "Filter by author"},
 			{"a", "My PRs"},

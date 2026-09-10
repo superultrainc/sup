@@ -256,6 +256,8 @@ type model struct {
 	pendingShards     int             // shards still streaming pages for the current refresh
 	statusFilterIndex int             // current index in statusFilters array (-1 means no filter)
 	authorFilter      string          // author filter (e.g., "!username"), empty means no author filter
+	repos             []string        // repo names present in m.prs, sorted; rebuilt on every refresh
+	repoFilterIndex   int             // current index into repos (-1 means no repo filter)
 }
 
 type prPageLoadedMsg struct {
@@ -430,6 +432,8 @@ func initialModel() model {
 				visibleCount:      len(cached),
 				statusFilterIndex: -1,
 				authorFilter:      "",
+				repos:             buildRepoList(cached),
+				repoFilterIndex:   -1,
 			}
 		}
 	}
@@ -441,6 +445,8 @@ func initialModel() model {
 		visibleCount:      0,
 		statusFilterIndex: -1,
 		authorFilter:      "",
+		repos:             []string{},
+		repoFilterIndex:   -1,
 	}
 }
 
@@ -850,6 +856,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		sortPRsByOldestFirst(m.prs)
+		m.syncRepoList()
 
 		m.applyFilter()
 
@@ -1024,9 +1031,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Esc clears an active filter first; only quits when nothing to clear.
 		if msg.String() == "esc" {
-			if m.authorFilter != "" || m.statusFilterIndex >= 0 || m.filterText != "" {
+			if m.authorFilter != "" || m.statusFilterIndex >= 0 || m.filterText != "" || m.repoFilterIndex >= 0 {
 				m.authorFilter = ""
 				m.statusFilterIndex = -1
+				m.repoFilterIndex = -1
 				m.filterText = ""
 				m.applyFilter()
 				return m, nil
@@ -1079,6 +1087,7 @@ func (m model) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // prFilter is the resolved set of active constraints. A zero-valued field means
 // that dimension is unconstrained; every non-empty field must match (AND).
 type prFilter struct {
+	repo     string // exact repo name match
 	author   string // substring of pr.Author.Login
 	reviewer string // substring of the requested reviewer names
 	status   string // exact statusLabelForFilter match
@@ -1086,6 +1095,9 @@ type prFilter struct {
 }
 
 func (f prFilter) matches(pr PR) bool {
+	if f.repo != "" && strings.ToLower(pr.Repository.Name) != f.repo {
+		return false
+	}
 	if f.author != "" && !strings.Contains(strings.ToLower(pr.Author.Login), f.author) {
 		return false
 	}
@@ -1110,10 +1122,13 @@ func (f prFilter) matches(pr PR) bool {
 }
 
 // buildFilter resolves model state into a single constraint set. Text-box
-// prefixes (@reviewer, !author) override the equivalent cycled filter.
+// prefixes (#repo, @reviewer, !author) override the equivalent cycled filter.
 func (m *model) buildFilter() prFilter {
 	f := prFilter{}
 
+	if r := m.currentRepo(); r != "" {
+		f.repo = strings.ToLower(r)
+	}
 	if m.statusFilterIndex >= 0 && m.statusFilterIndex < len(statusFilters) {
 		f.status = statusFilters[m.statusFilterIndex]
 	}
@@ -1126,6 +1141,8 @@ func (m *model) buildFilter() prFilter {
 
 	switch t := strings.ToLower(strings.TrimSpace(m.filterText)); {
 	case t == "":
+	case strings.HasPrefix(t, "#"):
+		f.repo = strings.TrimPrefix(t, "#")
 	case strings.HasPrefix(t, "@"):
 		f.reviewer = strings.TrimPrefix(t, "@")
 	case strings.HasPrefix(t, "!"):
@@ -1163,6 +1180,65 @@ func indexOfStatus(name string) int {
 	return -1
 }
 
+// currentRepo returns the pinned repo name, or "" when no repo filter is active.
+func (m *model) currentRepo() string {
+	if m.repoFilterIndex < 0 || m.repoFilterIndex >= len(m.repos) {
+		return ""
+	}
+	return m.repos[m.repoFilterIndex]
+}
+
+// buildRepoList collects the unique repo names across prs, sorted for stable cycling.
+func buildRepoList(prs []PR) []string {
+	seen := make(map[string]bool, len(prs))
+	var repos []string
+	for _, pr := range prs {
+		if name := pr.Repository.Name; name != "" && !seen[name] {
+			seen[name] = true
+			repos = append(repos, name)
+		}
+	}
+	sort.Strings(repos)
+	return repos
+}
+
+// syncRepoList rebuilds the repo list after a refresh, keeping the pinned repo
+// pinned even though its index may have shifted (or dropped out entirely).
+func (m *model) syncRepoList() {
+	pinned := m.currentRepo()
+	m.repos = buildRepoList(m.prs)
+	m.repoFilterIndex = -1
+	if pinned == "" {
+		return
+	}
+	for i, r := range m.repos {
+		if r == pinned {
+			m.repoFilterIndex = i
+			return
+		}
+	}
+}
+
+// cycleRepoFilter steps the repo filter by delta, passing through an
+// unfiltered position so the cycle can always be cleared.
+func (m *model) cycleRepoFilter(delta int) {
+	if len(m.repos) == 0 {
+		return
+	}
+	n := len(m.repos) + 1 // positions 0..len-1 are repos, len is "no filter"
+	pos := m.repoFilterIndex
+	if pos < 0 {
+		pos = len(m.repos)
+	}
+	pos = ((pos+delta)%n + n) % n
+	if pos == len(m.repos) {
+		m.repoFilterIndex = -1
+	} else {
+		m.repoFilterIndex = pos
+	}
+	m.applyFilter()
+}
+
 func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Confirmation prompts intercept input before any other handling.
 	if m.confirmAction != "" {
@@ -1182,9 +1258,16 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Handle status filter cycling
-	if msg.String() == "s" {
+	// Filter cycling keys run before the transient-feedback reset below.
+	switch msg.String() {
+	case "s":
 		m.cycleStatusFilter()
+		return m, nil
+	case "p":
+		m.cycleRepoFilter(1)
+		return m, nil
+	case "P":
+		m.cycleRepoFilter(-1)
 		return m, nil
 	}
 
@@ -1509,6 +1592,8 @@ func (m model) helpView() string {
 		{"Filter", [][2]string{
 			{"/", "Open filter"},
 			{"s", "Cycle status filter"},
+			{"p / P", "Cycle repo (fwd / back)"},
+			{"#repo", "Filter by repo"},
 			{"@user", "Filter by reviewer"},
 			{"!user", "Filter by author"},
 			{"a", "My PRs"},
@@ -1548,13 +1633,16 @@ func (m model) helpView() string {
 // activeFilterLabels describes each active filter for the header line.
 func (m model) activeFilterLabels() []string {
 	var parts []string
+	if repo := m.currentRepo(); repo != "" {
+		parts = append(parts, fmt.Sprintf("#%s (%d/%d)", repo, m.repoFilterIndex+1, len(m.repos)))
+	}
 	if m.authorFilter != "" {
 		parts = append(parts, m.authorFilter)
 	}
 	if m.statusFilterIndex >= 0 && m.statusFilterIndex < len(statusFilters) {
 		parts = append(parts, statusFilters[m.statusFilterIndex])
 	}
-	if m.filterText != "" && indexOfStatus(strings.ToLower(m.filterText)) < 0 {
+	if m.filterText != "" && indexOfStatus(strings.ToLower(m.filterText)) < 0 && !strings.HasPrefix(m.filterText, "#") {
 		parts = append(parts, m.filterText)
 	}
 	return parts

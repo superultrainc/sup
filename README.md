@@ -53,6 +53,14 @@ sup --mine   # Show PRs you're involved in (authored, reviewing, mentioned)
 
 Select a PR and press Enter to check it out locally.
 
+### Filtering
+
+Repo, author/reviewer, status, and free text combine — each one narrows the list further.
+
+- `p` / `P` steps through the repos present in the loaded PRs; the cycle passes through an unfiltered position to clear it.
+- `#name` in the filter box (`/`) matches a repo exactly.
+- `Esc` clears every active filter at once.
+
 ## Keybindings
 
 | Key | Action |
@@ -61,7 +69,10 @@ Select a PR and press Enter to check it out locally.
 | `k` / `↑` | Move up |
 | `g` | Go to top |
 | `G` | Go to bottom |
-| `/` | Filter PRs (prefix with `@` to filter by reviewer) |
+| `/` | Filter PRs (prefix `#` repo, `@` reviewer, `!` author) |
+| `s` | Cycle status filter |
+| `p` / `P` | Cycle repo filter (forward / back) |
+| `a` | Filter to your PRs |
 | `r` | Filter to your review requests |
 | `o` | Open PR in browser |
 | `O` | Open all PRs needing review in browser |

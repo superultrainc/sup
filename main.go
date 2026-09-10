@@ -230,32 +230,32 @@ type PR struct {
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type model struct {
-	prs          []PR
-	filtered     []PR
-	cursor       int
-	selected     *PR
-	filterMode   bool
-	filterText   string
-	err          error
-	quitting     bool
-	width        int
-	height       int
-	loading      bool
-	refreshing   bool // true when fetching new data while showing cached data
-	loadingDiff   bool // true while fetching diff before launching hunk
-	diffError     string
-	confirmAction string // non-empty while awaiting y/n confirmation (e.g. "approve")
-	confirmPR     *PR
-	actionPending bool   // true while a review submission is in flight
-	actionStatus  string // transient success/error feedback for review actions
-	helpMode      bool   // true while the help overlay is showing
-	visibleCount  int    // for animation
-	spinnerFrame  int    // for loading spinner
-	refreshSeen   map[string]bool // PR keys seen during the in-flight refresh
-	refreshID     int             // increments each refresh; stale page messages are dropped
-	pendingShards int             // shards still streaming pages for the current refresh
-	statusFilterIndex int          // current index in statusFilters array (-1 means no filter)
-	authorFilter  string          // author filter (e.g., "!username"), empty means no author filter
+	prs               []PR
+	filtered          []PR
+	cursor            int
+	selected          *PR
+	filterMode        bool
+	filterText        string
+	err               error
+	quitting          bool
+	width             int
+	height            int
+	loading           bool
+	refreshing        bool // true when fetching new data while showing cached data
+	loadingDiff       bool // true while fetching diff before launching hunk
+	diffError         string
+	confirmAction     string // non-empty while awaiting y/n confirmation (e.g. "approve")
+	confirmPR         *PR
+	actionPending     bool            // true while a review submission is in flight
+	actionStatus      string          // transient success/error feedback for review actions
+	helpMode          bool            // true while the help overlay is showing
+	visibleCount      int             // for animation
+	spinnerFrame      int             // for loading spinner
+	refreshSeen       map[string]bool // PR keys seen during the in-flight refresh
+	refreshID         int             // increments each refresh; stale page messages are dropped
+	pendingShards     int             // shards still streaming pages for the current refresh
+	statusFilterIndex int             // current index in statusFilters array (-1 means no filter)
+	authorFilter      string          // author filter (e.g., "!username"), empty means no author filter
 }
 
 type prPageLoadedMsg struct {
@@ -851,11 +851,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		sortPRsByOldestFirst(m.prs)
 
-		if m.filterText != "" {
-			m.applyFilter()
-		} else {
-			m.filtered = m.prs
-		}
+		m.applyFilter()
 
 		if selectedPRNumber > 0 {
 			for i, pr := range m.filtered {
@@ -1080,110 +1076,91 @@ func (m model) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *model) applyFilter() {
-	// If we have both author and status filters, apply them simultaneously
-	if m.authorFilter != "" && m.statusFilterIndex >= 0 {
-		m.filtered = nil
-		statusFilter := statusFilters[m.statusFilterIndex]
-			
-		// Parse author filter (e.g., "!username" or "@username")
-		authorPrefix := ""
-		authorName := m.authorFilter
-		if strings.HasPrefix(authorName, "!") {
-			authorPrefix = "!"
-			authorName = strings.TrimPrefix(authorName, "!")
-		} else if strings.HasPrefix(authorName, "@") {
-			authorPrefix = "@"
-			authorName = strings.TrimPrefix(authorName, "@")
-		}
-		authorName = strings.ToLower(authorName)
-		
-		for _, pr := range m.prs {
-			// Check author filter
-			authorMatch := false
-			if authorPrefix == "" {
-				// No author filter
-				authorMatch = true
-			} else if authorPrefix == "!" {
-				// Filter by author
-				authorMatch = strings.Contains(strings.ToLower(pr.Author.Login), authorName)
-			} else if authorPrefix == "@" {
-				// Filter by reviewer
-				requested := strings.ToLower(getRequestedReviewerNames(pr))
-				authorMatch = requested != "" && strings.Contains(requested, authorName)
-			}
-			
-			if !authorMatch {
-				continue
-			}
-			
-			// Check status filter
-			if statusLabelForFilter(pr) == statusFilter {
-				m.filtered = append(m.filtered, pr)
-			}
-		}
-		m.cursor = 0
-		return
+// prFilter is the resolved set of active constraints. A zero-valued field means
+// that dimension is unconstrained; every non-empty field must match (AND).
+type prFilter struct {
+	author   string // substring of pr.Author.Login
+	reviewer string // substring of the requested reviewer names
+	status   string // exact statusLabelForFilter match
+	text     string // substring across all searchable fields
+}
+
+func (f prFilter) matches(pr PR) bool {
+	if f.author != "" && !strings.Contains(strings.ToLower(pr.Author.Login), f.author) {
+		return false
 	}
-	
-	// Fall back to legacy behavior for backwards compatibility
-	if m.filterText == "" {
-		m.filtered = m.prs
-		m.cursor = 0
-		m.statusFilterIndex = -1
-		return
-	}
-
-	// Reset status filter index - will be updated if filter matches a status
-	m.statusFilterIndex = -1
-
-	filter := strings.ToLower(m.filterText)
-	m.filtered = nil
-
-	// @username prefix: match requested reviewers only
-	if strings.HasPrefix(filter, "@") {
-		userFilter := strings.TrimPrefix(filter, "@")
-		for _, pr := range m.prs {
-			requested := strings.ToLower(getRequestedReviewerNames(pr))
-			if requested != "" && strings.Contains(requested, userFilter) {
-				m.filtered = append(m.filtered, pr)
-			}
-		}
-		m.cursor = 0
-		return
-	}
-
-	// !username prefix: match author only
-	if strings.HasPrefix(filter, "!") {
-		userFilter := strings.TrimPrefix(filter, "!")
-		for _, pr := range m.prs {
-			if strings.Contains(strings.ToLower(pr.Author.Login), userFilter) {
-				m.filtered = append(m.filtered, pr)
-			}
-		}
-		m.cursor = 0
-		return
-	}
-
-	// Check if filter matches a status filter
-	for i, status := range statusFilters {
-		if filter == status {
-			m.statusFilterIndex = i
+	if f.reviewer != "" {
+		requested := strings.ToLower(getRequestedReviewerNames(pr))
+		if requested == "" || !strings.Contains(requested, f.reviewer) {
+			return false
 		}
 	}
-
-	// Default: search all fields including reviewer
-	for _, pr := range m.prs {
-		statusLabel := statusLabelForFilter(pr)
-		reviewers := getAllReviewerNames(pr)
+	if f.status != "" && statusLabelForFilter(pr) != f.status {
+		return false
+	}
+	if f.text != "" {
 		searchText := strings.ToLower(fmt.Sprintf("%s %s %s %s %s %s #%d %d %s",
-			pr.Repository.Name, pr.Title, pr.Author.Login, pr.HeadRefName, statusLabel,
-			pr.Repository.Owner.Login, pr.Number, pr.Number, reviewers))
-		if strings.Contains(searchText, filter) {
+			pr.Repository.Name, pr.Title, pr.Author.Login, pr.HeadRefName, statusLabelForFilter(pr),
+			pr.Repository.Owner.Login, pr.Number, pr.Number, getAllReviewerNames(pr)))
+		if !strings.Contains(searchText, f.text) {
+			return false
+		}
+	}
+	return true
+}
+
+// buildFilter resolves model state into a single constraint set. Text-box
+// prefixes (@reviewer, !author) override the equivalent cycled filter.
+func (m *model) buildFilter() prFilter {
+	f := prFilter{}
+
+	if m.statusFilterIndex >= 0 && m.statusFilterIndex < len(statusFilters) {
+		f.status = statusFilters[m.statusFilterIndex]
+	}
+	switch {
+	case strings.HasPrefix(m.authorFilter, "!"):
+		f.author = strings.ToLower(strings.TrimPrefix(m.authorFilter, "!"))
+	case strings.HasPrefix(m.authorFilter, "@"):
+		f.reviewer = strings.ToLower(strings.TrimPrefix(m.authorFilter, "@"))
+	}
+
+	switch t := strings.ToLower(strings.TrimSpace(m.filterText)); {
+	case t == "":
+	case strings.HasPrefix(t, "@"):
+		f.reviewer = strings.TrimPrefix(t, "@")
+	case strings.HasPrefix(t, "!"):
+		f.author = strings.TrimPrefix(t, "!")
+	default:
+		// Typing a status name drives the status cycle rather than a text search,
+		// so the header and the `s` key stay in sync with what is displayed.
+		if i := indexOfStatus(t); i >= 0 {
+			m.statusFilterIndex = i
+			f.status = statusFilters[i]
+		} else {
+			f.text = t
+		}
+	}
+	return f
+}
+
+func (m *model) applyFilter() {
+	f := m.buildFilter()
+	m.filtered = nil
+	for _, pr := range m.prs {
+		if f.matches(pr) {
 			m.filtered = append(m.filtered, pr)
 		}
 	}
 	m.cursor = 0
+}
+
+func indexOfStatus(name string) int {
+	for i, s := range statusFilters {
+		if name == s {
+			return i
+		}
+	}
+	return -1
 }
 
 func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1375,19 +1352,20 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 var statusFilters = []string{"draft", "approved", "denied", "review", "commented", "open"}
 
 func (m *model) cycleStatusFilter() {
-	m.statusFilterIndex = (m.statusFilterIndex + 1) % (len(statusFilters) + 1)
-	if m.statusFilterIndex >= len(statusFilters) {
-		// Cycle back to no filter
-		if m.authorFilter != "" {
-			// Keep only author filter
-			m.statusFilterIndex = -1
-		} else {
-			// Clear everything
-			m.filterText = ""
-			m.statusFilterIndex = -1
-		}
+	n := len(statusFilters) + 1 // last position is "no filter"
+	pos := m.statusFilterIndex
+	if pos < 0 {
+		pos = len(statusFilters)
+	}
+	pos = (pos + 1) % n
+	if pos == len(statusFilters) {
+		m.statusFilterIndex = -1
 	} else {
-		// Set status filter
+		m.statusFilterIndex = pos
+	}
+	// A typed status name feeds the same cycle, so drop it on the way past.
+	if indexOfStatus(strings.ToLower(m.filterText)) >= 0 {
+		m.filterText = ""
 	}
 	m.applyFilter()
 }
@@ -1567,6 +1545,21 @@ func (m model) helpView() string {
 	return s.String()
 }
 
+// activeFilterLabels describes each active filter for the header line.
+func (m model) activeFilterLabels() []string {
+	var parts []string
+	if m.authorFilter != "" {
+		parts = append(parts, m.authorFilter)
+	}
+	if m.statusFilterIndex >= 0 && m.statusFilterIndex < len(statusFilters) {
+		parts = append(parts, statusFilters[m.statusFilterIndex])
+	}
+	if m.filterText != "" && indexOfStatus(strings.ToLower(m.filterText)) < 0 {
+		parts = append(parts, m.filterText)
+	}
+	return parts
+}
+
 func (m model) View() string {
 	if m.helpMode {
 		return m.helpView()
@@ -1607,17 +1600,8 @@ func (m model) View() string {
 	filterLine := "  "
 	if m.filterMode {
 		filterLine = fmt.Sprintf("  / %s█", m.filterText)
-	} else if m.authorFilter != "" && m.statusFilterIndex >= 0 {
-		// Show both author and status filters
-		statusFilter := statusFilters[m.statusFilterIndex]
-		filterLine = fmt.Sprintf("  Filter: %s %s", m.authorFilter, statusFilter)
-	} else if m.authorFilter != "" {
-		filterLine = fmt.Sprintf("  Filter: %s", m.authorFilter)
-	} else if m.statusFilterIndex >= 0 {
-		statusFilter := statusFilters[m.statusFilterIndex]
-		filterLine = fmt.Sprintf("  Filter: %s", statusFilter)
-	} else if m.filterText != "" {
-		filterLine = fmt.Sprintf("  Filter: %s", m.filterText)
+	} else if parts := m.activeFilterLabels(); len(parts) > 0 {
+		filterLine = "  Filter: " + strings.Join(parts, " ")
 	}
 	switch {
 	case m.actionPending:

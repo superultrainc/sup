@@ -104,7 +104,7 @@ func kittyFreeAll() {
 
 // kittyImageLines lays out img in at most maxCols x maxRows cells and returns
 // the placeholder rows, queueing the transmission the first time.
-func kittyImageLines(key string, img image.Image, maxCols, maxRows int) []string {
+func kittyImageLines(key string, img image.Image, b64 string, maxCols, maxRows int) []string {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 	if w == 0 || h == 0 {
@@ -122,7 +122,11 @@ func kittyImageLines(key string, img image.Image, maxCols, maxRows int) []string
 		id = kittyNextID
 		kittyNextID++
 		kittyIDs[fmt.Sprintf("%s\x00%dx%d", key, cols, rows)] = id
-		kittyPending = append(kittyPending, kittyTransmit(id, img, cols, rows))
+		if b64 == "" {
+			tw, th := min(cols*cellPxW, w), min(rows*cellPxH, h)
+			b64 = kittyEncode(resample(img, tw, th))
+		}
+		kittyPending = append(kittyPending, kittyTransmit(id, b64, cols, rows))
 	}
 
 	color := fmt.Sprintf("\x1b[38;2;%d;%d;%dm", id>>16&0xff, id>>8&0xff, id&0xff)
@@ -141,21 +145,22 @@ func kittyImageLines(key string, img image.Image, maxCols, maxRows int) []string
 	return out
 }
 
-// kittyTransmit encodes img at the size it will be shown and wraps it in
-// chunked APC commands that create a virtual placement (U=1) of cols x rows.
-func kittyTransmit(id int, img image.Image, cols, rows int) string {
-	tw, th := cols*cellPxW, rows*cellPxH
-	b := img.Bounds()
-	if tw > b.Dx() || th > b.Dy() {
-		tw, th = b.Dx(), b.Dy()
-	}
+// kittyEncode returns img as a base64 PNG; kitty scales it into any placement box.
+func kittyEncode(img image.Image) string {
 	var buf bytes.Buffer
 	enc := png.Encoder{CompressionLevel: png.BestSpeed}
-	if err := enc.Encode(&buf, resample(img, tw, th)); err != nil {
+	if err := enc.Encode(&buf, img); err != nil {
 		return ""
 	}
-	data := base64.StdEncoding.EncodeToString(buf.Bytes())
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
 
+// kittyTransmit wraps a base64 PNG in chunked APC commands that create a
+// virtual placement (U=1) of cols x rows.
+func kittyTransmit(id int, data string, cols, rows int) string {
+	if data == "" {
+		return ""
+	}
 	const chunk = 4096
 	var sb strings.Builder
 	for i := 0; i < len(data); i += chunk {

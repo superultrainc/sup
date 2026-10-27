@@ -13,7 +13,7 @@ func TestKittyImageLines(t *testing.T) {
 	kittyPending, kittyIDs, kittyNextID = nil, map[string]int{}, 1
 
 	img := image.NewNRGBA(image.Rect(0, 0, 800, 400))
-	lines := kittyImageLines("u", img, 60, 40)
+	lines := kittyImageLines("u", img, "", 60, 40)
 	// 800px at 10px/cell caps at 60 cols (600px wide), so 300px tall is 15 rows.
 	if len(lines) != 15 {
 		t.Fatalf("want 15 rows, got %d", len(lines))
@@ -35,7 +35,7 @@ func TestKittyImageLines(t *testing.T) {
 	}
 
 	// Same image and size reuses the transmission.
-	kittyImageLines("u", img, 60, 40)
+	kittyImageLines("u", img, "", 60, 40)
 	if len(kittyPending) != 1 {
 		t.Fatalf("re-rendering the same size should not retransmit")
 	}

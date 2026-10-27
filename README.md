@@ -88,15 +88,17 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 
 ### PR view
 
-`v` opens a full-screen view of the selected PR with two tabs (`tab`, or `1`/`2`):
+`v` opens a full-screen view of the selected PR, laid out like GitHub's PR page. `tab` / `shift+tab` or `1`–`4` switch tabs:
 
-- **Conversation**: description, then a timeline of comments, reviews, and review threads, then checks.
-- **Files changed**: syntax-highlighted diff with word-level change highlights and review threads inline under their lines. Lockfiles and very large diffs start collapsed.
+- **Conversation**: the description, then a timeline of comments, reviews, pushed commits, and review threads (resolved ones folded), ending with a merge box (review, checks, conflicts). Reviewers, assignees, and labels sit in a sidebar on wide terminals.
+- **Commits**: commits grouped by day.
+- **Checks**: every check on the latest commit, failures first.
+- **Files changed**: syntax-highlighted diff with word-level change highlights and review threads inline under their lines, plus a file tree on wide terminals. Lockfiles and very large diffs start collapsed.
 
 | Key | Action |
 |-----|--------|
 | `j` / `k`, `ctrl+d` / `ctrl+u`, `space` | Scroll |
-| `[` / `]` | Previous / next item (Conversation) or file (Files) |
+| `[` / `]` | Previous / next item (Conversation, Commits) or file (Files) |
 | `n` / `N` | Next / previous review thread (Files) |
 | `s` | Cycle layout: auto → split → unified |
 | `w` | Toggle line wrapping |

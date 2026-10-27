@@ -195,6 +195,7 @@ type PR struct {
 	Number      int    `json:"number"`
 	Title       string `json:"title"`
 	HeadRefName string `json:"headRefName"`
+	HeadRefOid  string `json:"headRefOid"`
 	IsDraft     bool   `json:"isDraft"`
 	Additions   int    `json:"additions"`
 	Deletions   int    `json:"deletions"`
@@ -259,6 +260,8 @@ type model struct {
 	repos             []string        // repo names present in m.prs, sorted; rebuilt on every refresh
 	repoFilterIndex   int             // current index into repos (-1 means no repo filter)
 	detail            *prDetailView   // non-nil while the full PR view is open
+	cache             map[string]*prCacheEntry
+	hoverSeq          int // invalidates pending prefetch ticks when the cursor moves
 }
 
 type prPageLoadedMsg struct {
@@ -437,6 +440,7 @@ func initialModel() model {
 				authorFilter:      "",
 				repos:             buildRepoList(cached),
 				repoFilterIndex:   -1,
+				cache:             map[string]*prCacheEntry{},
 			}
 		}
 	}
@@ -450,6 +454,7 @@ func initialModel() model {
 		authorFilter:      "",
 		repos:             []string{},
 		repoFilterIndex:   -1,
+		cache:             map[string]*prCacheEntry{},
 	}
 }
 
@@ -580,6 +585,7 @@ func fetchShardPage(shardIdx int, after string, refreshID int) tea.Cmd {
 						number
 						title
 						headRefName
+						headRefOid
 						isDraft
 						additions
 						deletions
@@ -717,6 +723,7 @@ func fetchSinglePRCmd(pr PR) tea.Cmd {
 					number
 					title
 					headRefName
+					headRefOid
 					isDraft
 					additions
 					deletions
@@ -810,33 +817,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case prPatchFetchedMsg:
-		if m.detail == nil || prKey(m.detail.pr) != msg.key {
-			return m, nil
-		}
-		m.detail.diffLoading = false
-		m.detail.diffErr = msg.err
-		if msg.err == nil {
-			m.detail.diff = msg.files
-			m.detail.rebuildFiles()
-			m.detail.clampScroll(m.height)
-		}
+		m.handlePatchFetched(msg)
 		return m, nil
 
 	case prDetailFetchedMsg:
-		if m.detail == nil || prKey(m.detail.pr) != msg.key {
-			return m, nil
-		}
-		m.detail.loading = false
-		m.detail.err = msg.err
-		if msg.err == nil {
-			m.detail.detail = msg.detail
-			m.detail.rebuild(m.width)
-			m.detail.clampScroll(m.height)
+		m.handleDetailFetched(msg)
+		return m, nil
+
+	case diskCacheLoadedMsg:
+		m.handleDiskCacheLoaded(msg)
+		return m, nil
+
+	case hoverMsg:
+		return m, m.handleHover(msg)
+
+	case reviewerCandidatesMsg:
+		if v := m.detail; v != nil && v.picker != nil && prKey(v.pr) == msg.key {
+			if msg.err != nil {
+				v.picker.loading, v.picker.err = false, msg.err
+			} else {
+				latest, _ := latestReviewStates(v.detail)
+				v.picker.setCandidates(msg.cands, v.pr.Author.Login, latest)
+			}
 		}
 		return m, nil
 
+	case reviewersSavedMsg:
+		return m, m.handleReviewersSaved(msg)
+
 	case startRefreshMsg:
-		return m, m.startRefresh()
+		return m, tea.Batch(m.startRefresh(), m.schedulePrefetch())
 
 	case prPageLoadedMsg:
 		// Stale message from a prior refresh — ignore.
@@ -936,7 +946,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		if m.loading || m.refreshing || m.loadingDiff || m.actionPending || (m.detail != nil && (m.detail.loading || m.detail.diffLoading)) {
+		if m.loading || m.refreshing || m.loadingDiff || m.actionPending || (m.detail != nil && (m.detail.loading || m.detail.diffLoading ||
+			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)))) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
 			return m, spinnerTick()
 		}
@@ -1353,23 +1364,23 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
-		return m, nil
+		return m, m.schedulePrefetch()
 
 	case "down", "j":
 		if m.cursor < len(m.filtered)-1 {
 			m.cursor++
 		}
-		return m, nil
+		return m, m.schedulePrefetch()
 
 	case "g":
 		m.cursor = 0
-		return m, nil
+		return m, m.schedulePrefetch()
 
 	case "G":
 		if len(m.filtered) > 0 {
 			m.cursor = len(m.filtered) - 1
 		}
-		return m, nil
+		return m, m.schedulePrefetch()
 
 	case "a":
 		if currentUser != "" {
@@ -1420,9 +1431,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "v":
 		if pr, ok := m.currentPR(); ok {
-			m.detail = newDetailView(pr)
-			m.detail.width = m.width
-			return m, tea.Batch(fetchPRDetailCmd(pr), fetchPatchCmd(pr), spinnerTick())
+			return m, m.openDetail(pr)
 		}
 		return m, nil
 
@@ -2055,6 +2064,8 @@ func main() {
 	if !lipgloss.HasDarkBackground() {
 		glamourStyle = "light"
 	}
+
+	go pruneDiskCache()
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
 	finalModel, err := p.Run()

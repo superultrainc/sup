@@ -618,6 +618,8 @@ func threadCard(t reviewThread, label string, snippet []string, width int, th di
 type prPatchFetchedMsg struct {
 	key   string
 	files []*diffFile
+	patch string
+	head  string
 	err   error
 }
 
@@ -630,7 +632,7 @@ func fetchPatchCmd(pr PR) tea.Cmd {
 		}
 		files := parseUnifiedDiff(string(patch))
 		highlightFiles(files)
-		return prPatchFetchedMsg{key: prKey(pr), files: files}
+		return prPatchFetchedMsg{key: prKey(pr), files: files, patch: string(patch), head: pr.HeadRefOid}
 	}
 }
 

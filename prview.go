@@ -83,6 +83,7 @@ type prDetail struct {
 			RequestedReviewer struct {
 				Login string `json:"login"`
 				Name  string `json:"name"`
+				Slug  string `json:"slug"` // teams only
 			} `json:"requestedReviewer"`
 		} `json:"nodes"`
 	} `json:"reviewRequests"`
@@ -119,7 +120,7 @@ const prDetailQuery = `{
 			title body url state isDraft createdAt
 			author { login }
 			baseRefName headRefName additions deletions changedFiles reviewDecision mergeable
-			reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
+			reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name slug } } } }
 			files(first: 100) { nodes { path additions deletions } }
 			commits(last: 1) { totalCount nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
 				__typename
@@ -235,6 +236,7 @@ type prDetailView struct {
 	wrap        bool
 	collapsed   map[string]bool // per-path override of the default collapse rule
 	width       int
+	picker      *reviewerPicker // non-nil while the reviewer picker is open
 }
 
 func newDetailView(pr PR) *prDetailView {
@@ -249,8 +251,18 @@ var (
 	activeTabStyle   = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(lipgloss.Color("205"))
 )
 
-// detailHeaderHeight is the fixed rows above the body: header card (6) + tabs (1).
-const detailHeaderHeight = 7
+// compactHeader trades the header card for one line where vertical space matters.
+func (v *prDetailView) compactHeader(termHeight int) bool {
+	return v.tab == tabFiles || termHeight < 28
+}
+
+// headerHeight is the fixed rows above the body, tabs included.
+func (v *prDetailView) headerHeight(termHeight int) int {
+	if v.compactHeader(termHeight) {
+		return 2
+	}
+	return 10 // card: border + 7 rows + border, then tabs
+}
 
 func (v *prDetailView) pane() *detailPane {
 	if v.tab == tabFiles {
@@ -260,7 +272,7 @@ func (v *prDetailView) pane() *detailPane {
 }
 
 func (v *prDetailView) bodyHeight(termHeight int) int {
-	return max(termHeight-detailHeaderHeight-2, 3) // 2 footer rows
+	return max(termHeight-v.headerHeight(termHeight)-2, 3) // 2 footer rows
 }
 
 func (v *prDetailView) maxScroll(termHeight int) int {
@@ -394,12 +406,6 @@ func (v *prDetailView) rebuildConv() {
 	}
 	add(textCard(sectionHeadStyle.Render("Description"), th.border, desc, cw)...)
 
-	if checks, summary := checkLines(d); len(checks) > 0 {
-		add("")
-		marks = append(marks, len(lines))
-		add(textCard(sectionHeadStyle.Render("Checks")+metaStyle.Render(" · ")+summary, th.border, checks, cw)...)
-	}
-
 	var items []timelineItem
 	for _, c := range d.Comments.Nodes {
 		c := c
@@ -448,6 +454,11 @@ func (v *prDetailView) rebuildConv() {
 		add(connector)
 		marks = append(marks, len(lines))
 		add(it.render(cw)...)
+	}
+	if checks, summary := checkLines(d); len(checks) > 0 {
+		add("")
+		marks = append(marks, len(lines))
+		add(textCard(sectionHeadStyle.Render("Checks")+metaStyle.Render(" · ")+summary, th.border, checks, cw)...)
 	}
 	v.conv.lines, v.conv.marks = lines, marks
 }
@@ -551,36 +562,10 @@ func checkIcon(result string) string {
 func (m model) detailView() string {
 	v := m.detail
 	d := v.detail
-	th := currentDiffTheme()
 	var s strings.Builder
-	cw := max(m.width-2, 40)
 
-	slug := fmt.Sprintf("%s/%s #%d", v.pr.Repository.Owner.Login, v.pr.Repository.Name, v.pr.Number)
-	cardTitle := titleStyle.Render("sup") + metaStyle.Render(" › ") + normalStyle.Render(slug) + "  " + getStatusBadge(v.pr)
-
-	title, author, head, base := v.pr.Title, v.pr.Author.Login, v.pr.HeadRefName, ""
-	adds, dels := v.pr.Additions, v.pr.Deletions
-	if d != nil {
-		title, author, head, base = d.Title, d.Author.Login, d.HeadRefName, d.BaseRefName
-		adds, dels = d.Additions, d.Deletions
-	}
-	branches := branchStyle.Render(head)
-	if base != "" {
-		branches = branchStyle.Render(base) + metaStyle.Render(" ← ") + branches
-	}
-	meta := authorStyle.Render(author) + metaStyle.Render(" wants to merge ") + branches + "  " +
-		additionsStyle.Render(fmt.Sprintf("+%d", adds)) + " " + deletionsStyle.Render(fmt.Sprintf("-%d", dels))
-	if d != nil {
-		meta += metaStyle.Render(fmt.Sprintf(" · %d commits · opened %s", d.Commits.TotalCount, relTime(d.CreatedAt)))
-	}
-	header := []string{
-		selectedNormalStyle.Render(title),
-		meta,
-		m.detailStatusLine(d),
-		detailReviewersLine(v.pr, d),
-	}
-	for _, l := range textCard(cardTitle, th.border, header, cw) {
-		s.WriteString(" " + l + "\n")
+	for _, l := range m.detailHeader() {
+		s.WriteString(l + "\n")
 	}
 	s.WriteString(m.detailTabs() + "\n")
 
@@ -597,7 +582,13 @@ func (m model) detailView() string {
 	case v.tab == tabFiles && v.diff == nil:
 		placeholder = reviewRequestedStyle.Render("  " + spinnerFrames[m.spinnerFrame] + " Loading diff...")
 	}
-	if placeholder != "" {
+	if v.picker != nil {
+		lines := m.pickerView(bodyH)
+		for _, l := range lines[:min(len(lines), bodyH)] {
+			s.WriteString(l + "\n")
+		}
+		bodyH -= min(len(lines), bodyH)
+	} else if placeholder != "" {
 		s.WriteString("\n" + placeholder + "\n")
 		bodyH -= 2
 	} else {
@@ -650,58 +641,158 @@ func (m model) detailTabs() string {
 	return line
 }
 
-func (m model) detailStatusLine(d *prDetail) string {
+var (
+	prTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	headLabelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+)
+
+// statusPill is the PR's review state as a filled badge, like GitHub's state label.
+func statusPill(pr PR, d *prDetail) string {
+	draft, decision := pr.IsDraft, pr.ReviewDecision
+	if d != nil {
+		draft, decision = d.IsDraft, d.ReviewDecision
+	}
+	label, bg := "Open", "#238636"
+	switch {
+	case draft:
+		label, bg = "Draft", "#6e7681"
+	case decision == "APPROVED":
+		label, bg = "Approved", "#1f883d"
+	case decision == "CHANGES_REQUESTED":
+		label, bg = "Changes requested", "#cf222e"
+	case decision == "REVIEW_REQUIRED":
+		label, bg = "Review required", "#9a6700"
+	}
+	return sty("#ffffff", bg, true, false).Render(" " + label + " ")
+}
+
+func headRow(label, value string) string {
+	return headLabelStyle.Render(pad(label, 11)) + value
+}
+
+func (m model) detailHeader() []string {
+	v := m.detail
+	d := v.detail
+	th := currentDiffTheme()
+	slug := fmt.Sprintf("%s/%s #%d", v.pr.Repository.Owner.Login, v.pr.Repository.Name, v.pr.Number)
+	title := v.pr.Title
+	if d != nil {
+		title = d.Title
+	}
+	pill := statusPill(v.pr, d)
+
+	if v.compactHeader(m.height) {
+		line := " " + pill + " " + prTitleStyle.Render(title) + metaStyle.Render("  "+slug)
+		return []string{fitWidth(line, m.width-1)}
+	}
+
+	author, head, base := v.pr.Author.Login, v.pr.HeadRefName, ""
+	adds, dels, files, commits := v.pr.Additions, v.pr.Deletions, 0, 0
+	opened := ""
+	if d != nil {
+		author, head, base = d.Author.Login, d.HeadRefName, d.BaseRefName
+		adds, dels, files, commits = d.Additions, d.Deletions, d.ChangedFiles, d.Commits.TotalCount
+		opened = " opened " + relTime(d.CreatedAt)
+	}
+	branches := branchStyle.Render(head)
+	if base != "" {
+		branches = branchStyle.Render(base) + metaStyle.Render(" ← ") + branches
+	}
+	changes := additionsStyle.Render(fmt.Sprintf("+%d", adds)) + " " + deletionsStyle.Render(fmt.Sprintf("-%d", dels))
+	if d != nil {
+		changes += metaStyle.Render(fmt.Sprintf("  ·  %d files  ·  %d commits", files, commits))
+	}
+	rows := []string{
+		pill + "  " + prTitleStyle.Render(title),
+		authorStyle.Render(author) + metaStyle.Render(opened),
+		"",
+		headRow("Branch", branches),
+		headRow("Changes", changes),
+		headRow("Status", detailStatusLine(d)),
+		headRow("Reviewers", detailReviewersLine(v.pr, d)) + metaStyle.Render("   r to edit"),
+	}
+	cardTitle := titleStyle.Render("sup") + metaStyle.Render(" › ") + normalStyle.Render(slug)
+	out := textCard(cardTitle, th.border, rows, m.width-2)
+	for i := range out {
+		out[i] = " " + out[i]
+	}
+	return out
+}
+
+func detailStatusLine(d *prDetail) string {
 	if d == nil {
-		return ""
+		return metaStyle.Render("loading…")
 	}
 	var parts []string
-	state := strings.ToLower(d.State)
-	if d.IsDraft {
-		state = "draft"
-	}
-	parts = append(parts, metaStyle.Render("state ")+normalStyle.Render(state))
-	if len(d.Commits.Nodes) > 0 && d.Commits.Nodes[0].Commit.StatusCheckRollup != nil {
-		r := d.Commits.Nodes[0].Commit.StatusCheckRollup.State
-		parts = append(parts, metaStyle.Render("checks ")+checkIcon(r)+" "+normalStyle.Render(strings.ToLower(r)))
+	if _, summary := checkLines(d); summary != "" {
+		parts = append(parts, summary)
+	} else {
+		parts = append(parts, metaStyle.Render("no checks"))
 	}
 	switch d.Mergeable {
 	case "MERGEABLE":
-		parts = append(parts, metaStyle.Render("merge ")+approvedStyle.Render("clean"))
+		parts = append(parts, approvedStyle.Render("✓ no conflicts"))
 	case "CONFLICTING":
-		parts = append(parts, metaStyle.Render("merge ")+changesRequestedStyle.Render("conflicts"))
+		parts = append(parts, changesRequestedStyle.Render("✗ conflicts"))
 	}
-	threads, unresolved := 0, 0
+	unresolved := 0
 	for _, t := range d.ReviewThreads.Nodes {
-		threads++
 		if !t.IsResolved {
 			unresolved++
 		}
 	}
-	if threads > 0 {
-		parts = append(parts, metaStyle.Render("threads ")+normalStyle.Render(fmt.Sprintf("%d/%d unresolved", unresolved, threads)))
+	switch {
+	case unresolved > 0:
+		parts = append(parts, reviewRequestedStyle.Render(fmt.Sprintf("◆ %d unresolved", unresolved)))
+	case len(d.ReviewThreads.Nodes) > 0:
+		parts = append(parts, approvedStyle.Render("✓ threads resolved"))
 	}
 	return strings.Join(parts, metaStyle.Render("  ·  "))
 }
 
-// detailReviewersLine shows each reviewer's latest state, then pending requests.
-func detailReviewersLine(pr PR, d *prDetail) string {
+// latestReviewStates maps each reviewer (not the author) to their latest
+// meaningful review state; a later COMMENTED doesn't override approval.
+func latestReviewStates(d *prDetail) (map[string]string, []string) {
 	latest := map[string]string{}
 	var order []string
-	if d != nil {
-		for _, r := range d.Reviews.Nodes {
-			login := r.Author.Login
-			if login == "" || login == d.Author.Login || r.State == "PENDING" {
-				continue
-			}
-			if _, ok := latest[login]; !ok {
-				order = append(order, login)
-			}
-			// A later COMMENTED review doesn't override an approval or change request.
-			if prev := latest[login]; r.State != "COMMENTED" || prev == "" || prev == "COMMENTED" {
-				latest[login] = r.State
-			}
+	if d == nil {
+		return latest, order
+	}
+	for _, r := range d.Reviews.Nodes {
+		login := r.Author.Login
+		if login == "" || login == d.Author.Login || r.State == "PENDING" {
+			continue
+		}
+		if _, ok := latest[login]; !ok {
+			order = append(order, login)
+		}
+		if prev := latest[login]; r.State != "COMMENTED" || prev == "" || prev == "COMMENTED" {
+			latest[login] = r.State
 		}
 	}
+	return latest, order
+}
+
+func requestedReviewers(pr PR, d *prDetail) []string {
+	if d == nil {
+		return strings.Fields(getRequestedReviewerNames(pr))
+	}
+	var names []string
+	for _, rr := range d.ReviewRequests.Nodes {
+		name := rr.RequestedReviewer.Login
+		if name == "" {
+			name = rr.RequestedReviewer.Name
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// detailReviewersLine shows each reviewer's latest state, then pending requests.
+func detailReviewersLine(pr PR, d *prDetail) string {
+	latest, order := latestReviewStates(d)
 	var parts []string
 	for _, login := range order {
 		switch latest[login] {
@@ -710,29 +801,16 @@ func detailReviewersLine(pr PR, d *prDetail) string {
 		case "CHANGES_REQUESTED":
 			parts = append(parts, changesRequestedStyle.Render("✗ "+login))
 		default:
-			parts = append(parts, commentedStyle.Render("💬 "+login))
+			parts = append(parts, commentedStyle.Render("● "+login))
 		}
 	}
-	requested := strings.Fields(getRequestedReviewerNames(pr))
-	if d != nil {
-		requested = nil
-		for _, rr := range d.ReviewRequests.Nodes {
-			name := rr.RequestedReviewer.Login
-			if name == "" {
-				name = rr.RequestedReviewer.Name
-			}
-			if name != "" {
-				requested = append(requested, name)
-			}
-		}
-	}
-	for _, name := range requested {
-		parts = append(parts, reviewRequestedStyle.Render("● "+name))
+	for _, name := range requestedReviewers(pr, d) {
+		parts = append(parts, reviewRequestedStyle.Render("○ "+name))
 	}
 	if len(parts) == 0 {
-		return metaStyle.Render("reviewers ") + metaStyle.Render("none")
+		return metaStyle.Render("none")
 	}
-	return metaStyle.Render("reviewers ") + strings.Join(parts, "  ")
+	return strings.Join(parts, "  ")
 }
 
 func (m model) detailFooter() string {
@@ -763,14 +841,20 @@ func (m model) detailFooter() string {
 	if ms := v.maxScroll(m.height); ms > 0 {
 		pct = fmt.Sprintf("%d%%", v.pane().scroll*100/ms)
 	}
-	help := " j/k scroll · [/] next item · tab files · d hunk · A approve · D changes · M comment · o open · esc back"
+	help := " j/k scroll · [/] next item · tab files · r reviewers · d hunk · A approve · D changes · M comment · o open · esc back"
 	if v.tab == tabFiles {
 		help = " j/k scroll · [/] file · n/N comment · s layout · w wrap · x collapse · tab conversation · esc back"
+	}
+	if v.picker != nil {
+		help = " ↑/↓ move · space toggle · type to filter · enter save · esc cancel"
 	}
 	return status + "\n" + helpStyle.Render(truncateToWidth(help+"  "+pct, max(m.width-1, 20)))
 }
 
 func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.detail.picker != nil {
+		return m.handlePickerInput(msg)
+	}
 	if m.confirmAction != "" {
 		return m.handleNormalInput(msg)
 	}
@@ -835,9 +919,15 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.collapsed[f.path()] = !r.isCollapsed(f)
 			v.rebuildFilesKeepingPlace()
 		}
+	case "r":
+		v.picker = newReviewerPicker(v.pr, v.detail)
+		m.actionStatus = ""
+		return m, tea.Batch(fetchReviewerCandidatesCmd(v.pr), spinnerTick())
 	case "R":
+		e := m.cacheEntry(prKey(v.pr))
+		e.detailAt, e.head = time.Time{}, "" // force both to refetch
 		v.loading, v.diffLoading = true, true
-		return m, tea.Batch(fetchPRDetailCmd(v.pr), fetchPatchCmd(v.pr), spinnerTick())
+		return m, tea.Batch(append(m.fetchMissing(v.pr, e), spinnerTick())...)
 	case "d", "A", "D", "M", "o", "c":
 		return m.handleNormalInput(msg)
 	}

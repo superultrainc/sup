@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1550,45 +1551,39 @@ func (m *model) cycleStatusFilter() {
 	m.applyFilter()
 }
 
-func getStatusBadge(pr PR) string {
-	if pr.IsDraft {
-		return draftStyle.Render("[Draft]")
-	}
+// Status kinds index the badge painters; order matches statusKind.
+var (
+	badgeLabels    = [6]string{"[Draft]", "[Approved]", "[Denied]", "[Commented]", "[Review]", "[Open]"}
+	badgeColors    = [6]string{"241", "78", "196", "117", "214", "39"}
+	badgeSelColors = [6]string{"250", "114", "203", "159", "221", "81"}
+)
 
+func statusKind(pr PR) int {
+	if pr.IsDraft {
+		return 0
+	}
 	switch pr.ReviewDecision {
 	case "APPROVED":
-		return approvedStyle.Render("[Approved]")
+		return 1
 	case "CHANGES_REQUESTED":
-		return changesRequestedStyle.Render("[Denied]")
+		return 2
 	case "REVIEW_REQUIRED":
-		// Check if last review was a comment
 		if len(pr.Reviews.Nodes) > 0 && pr.Reviews.Nodes[0].State == "COMMENTED" {
-			return commentedStyle.Render("[Commented]")
+			return 3
 		}
-		return reviewRequestedStyle.Render("[Review]")
-	default:
-		return openStyle.Render("[Open]")
+		return 4
 	}
+	return 5
+}
+
+func getStatusBadge(pr PR) string {
+	k := statusKind(pr)
+	return sty(badgeColors[k], "", false, false).Render(badgeLabels[k])
 }
 
 func getSelectedStatusBadge(pr PR) string {
-	if pr.IsDraft {
-		return selectedDraftStyle.Render("[Draft]")
-	}
-
-	switch pr.ReviewDecision {
-	case "APPROVED":
-		return selectedApprovedStyle.Render("[Approved]")
-	case "CHANGES_REQUESTED":
-		return selectedChangesRequestedStyle.Render("[Denied]")
-	case "REVIEW_REQUIRED":
-		if len(pr.Reviews.Nodes) > 0 && pr.Reviews.Nodes[0].State == "COMMENTED" {
-			return selectedCommentedStyle.Render("[Commented]")
-		}
-		return selectedReviewRequestedStyle.Render("[Review]")
-	default:
-		return selectedOpenStyle.Render("[Open]")
-	}
+	k := statusKind(pr)
+	return sty(badgeSelColors[k], "", true, false).Render(badgeLabels[k])
 }
 
 func statusLabelForFilter(pr PR) string {
@@ -1610,6 +1605,9 @@ func statusLabelForFilter(pr PR) string {
 		return "open"
 	}
 }
+
+// statusBadgeLabel is the display text of the list status badge.
+func statusBadgeLabel(pr PR) string { return badgeLabels[statusKind(pr)] }
 
 func getReviewer(pr PR) string {
 	// First check requested reviewers
@@ -1761,8 +1759,7 @@ func (m model) view() string {
 		return m.helpView()
 	}
 	var s strings.Builder
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	loadingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	lp := newListPainters()
 
 	// Fixed column widths
 	const (
@@ -1802,7 +1799,7 @@ func (m model) view() string {
 	switch {
 	case m.actionPending:
 		spinner := spinnerFrames[m.spinnerFrame]
-		s.WriteString(loadingStyle.Render("  " + spinner + " Submitting review..."))
+		s.WriteString(lp.loading.Render("  " + spinner + " Submitting review..."))
 	case m.actionStatus != "":
 		style := approvedStyle
 		if strings.HasPrefix(m.actionStatus, "Error") || strings.Contains(m.actionStatus, "cancelled") {
@@ -1812,14 +1809,14 @@ func (m model) view() string {
 	case filterLine == "  ":
 		s.WriteString(filterLine)
 	default:
-		s.WriteString(filterStyle.Render(filterLine))
+		s.WriteString(lp.filter.Render(filterLine))
 	}
 	s.WriteString("\n")
 
 	// Always show header
-	s.WriteString(dimStyle.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
+	s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
 	s.WriteString("\n")
-	s.WriteString(dimStyle.Render("  " + strings.Repeat("─", separatorWidth)))
+	s.WriteString(lp.dim.Render("  " + strings.Repeat("─", separatorWidth)))
 	s.WriteString("\n")
 
 	if m.err != nil {
@@ -1830,7 +1827,7 @@ func (m model) view() string {
 
 	if m.loading {
 		spinner := spinnerFrames[m.spinnerFrame]
-		s.WriteString(loadingStyle.Render("  " + spinner + " Loading..."))
+		s.WriteString(lp.loading.Render("  " + spinner + " Loading..."))
 		s.WriteString("\n")
 		return s.String()
 	}
@@ -1866,58 +1863,55 @@ func (m model) view() string {
 				cursor = "» "
 			}
 
-			// Prepare padded values
-			statusPlain := pad(stripAnsi(getStatusBadge(pr)), colStatus)
-			repo := pad(truncate(pr.Repository.Name, colRepo-1), colRepo)
-			num := pad(fmt.Sprintf("#%d", pr.Number), colNum)
-			title := pad(truncate(pr.Title, colTitle-1), colTitle)
-			author := pad(truncate(pr.Author.Login, colAuthor-1), colAuthor)
-			reviewer := pad(truncate(getReviewer(pr), colReviewer-1), colReviewer)
-			branch := pad(truncate(pr.HeadRefName, colBranch-1), colBranch)
+			kind := statusKind(pr)
+			label := badgeLabels[kind]
+			repo, repoW := padW(truncate(pr.Repository.Name, colRepo-1), colRepo)
+			num, numW := padW("#"+strconv.Itoa(pr.Number), colNum)
+			title, titleW := padW(truncate(pr.Title, colTitle-1), colTitle)
+			author, authorW := padW(truncate(pr.Author.Login, colAuthor-1), colAuthor)
+			reviewer, reviewerW := padW(truncate(getReviewer(pr), colReviewer-1), colReviewer)
+			branch, branchW := padW(truncate(pr.HeadRefName, colBranch-1), colBranch)
 			leftDiff := (colDiff - 1) / 2
 			rightDiff := colDiff - 1 - leftDiff
-			addsPlain := fmt.Sprintf("+%d", pr.Additions)
-			delsPlain := fmt.Sprintf("-%d", pr.Deletions)
-			addsPadded := padLeft(addsPlain, leftDiff)
-			delsPadded := padLeft(delsPlain, rightDiff)
-			diffPlain := addsPadded + " " + delsPadded
-			rowPlain := cursor + statusPlain + repo + num + title + author + reviewer + branch + diffPlain
+			addsPadded, addsW := padLeftW("+"+strconv.Itoa(pr.Additions), leftDiff)
+			delsPadded, delsW := padLeftW("-"+strconv.Itoa(pr.Deletions), rightDiff)
+			statusW := displayWidth(label)
+			if statusW < colStatus {
+				statusW = colStatus
+			}
+			currentWidth := len(cursor) + statusW + repoW + numW + titleW + authorW + reviewerW + branchW + addsW + 1 + delsW
+			statusFill := ""
+			if n := colStatus - len(label); n > 0 {
+				statusFill = spaces(n)
+			}
 
 			if isSelected {
-				s.WriteString(caretStyle.Render(cursor))
-				s.WriteString(getSelectedStatusBadge(pr) + strings.Repeat(" ", colStatus-len(stripAnsi(getSelectedStatusBadge(pr)))))
-				s.WriteString(selectedNormalStyle.Render(repo))
-				s.WriteString(selectedNormalStyle.Render(num))
-				s.WriteString(selectedNormalStyle.Render(title))
-				s.WriteString(selectedStyle.Render(author))
-				s.WriteString(selectedReviewRequestedStyle.Render(reviewer))
-				s.WriteString(selectedBranchStyle.Render(branch))
-				s.WriteString(selectedAdditionsStyle.Render(addsPadded))
+				s.WriteString(lp.caret.Render(cursor))
+				s.WriteString(lp.selBadge[kind].Render(label) + statusFill)
+				s.WriteString(lp.selNormal.Render(repo))
+				s.WriteString(lp.selNormal.Render(num))
+				s.WriteString(lp.selNormal.Render(title))
+				s.WriteString(lp.selAuthor.Render(author))
+				s.WriteString(lp.selReviewer.Render(reviewer))
+				s.WriteString(lp.selBranch.Render(branch))
+				s.WriteString(lp.selAdds.Render(addsPadded))
 				s.WriteString(" ")
-				s.WriteString(selectedDeletionsStyle.Render(delsPadded))
-
-				currentWidth := displayWidth(rowPlain)
-				if currentWidth < rowWidth {
-					s.WriteString(strings.Repeat(" ", rowWidth-currentWidth))
-				}
+				s.WriteString(lp.selDels.Render(delsPadded))
 			} else {
 				s.WriteString(cursor)
-				// Apply colors after padding
-				s.WriteString(getStatusBadge(pr) + strings.Repeat(" ", colStatus-len(stripAnsi(getStatusBadge(pr)))))
-				s.WriteString(normalStyle.Render(repo))
-				s.WriteString(normalStyle.Render(num))
-				s.WriteString(normalStyle.Render(title))
-				s.WriteString(dimStyle.Render(author))
-				s.WriteString(reviewRequestedStyle.Render(reviewer))
-				s.WriteString(branchStyle.Render(branch))
-				s.WriteString(additionsStyle.Render(addsPadded))
+				s.WriteString(lp.badge[kind].Render(label) + statusFill)
+				s.WriteString(lp.normal.Render(repo))
+				s.WriteString(lp.normal.Render(num))
+				s.WriteString(lp.normal.Render(title))
+				s.WriteString(lp.dim.Render(author))
+				s.WriteString(lp.reviewer.Render(reviewer))
+				s.WriteString(lp.branch.Render(branch))
+				s.WriteString(lp.adds.Render(addsPadded))
 				s.WriteString(" ")
-				s.WriteString(deletionsStyle.Render(delsPadded))
-
-				currentWidth := displayWidth(rowPlain)
-				if currentWidth < rowWidth {
-					s.WriteString(strings.Repeat(" ", rowWidth-currentWidth))
-				}
+				s.WriteString(lp.dels.Render(delsPadded))
+			}
+			if currentWidth < rowWidth {
+				s.WriteString(spaces(rowWidth - currentWidth))
 			}
 			s.WriteString("\n")
 		}
@@ -1929,25 +1923,91 @@ func (m model) view() string {
 			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))
 		}
 		if m.confirmAction == "approve" && m.confirmPR != nil {
-			s.WriteString(filterStyle.Render(fmt.Sprintf("  Approve PR #%d? (y/n)", m.confirmPR.Number)))
+			s.WriteString(lp.filter.Render(fmt.Sprintf("  Approve PR #%d? (y/n)", m.confirmPR.Number)))
 		} else if m.refreshing {
 			spinner := spinnerFrames[m.spinnerFrame]
-			s.WriteString(loadingStyle.Render("  " + spinner + " Refreshing"))
+			s.WriteString(lp.loading.Render("  " + spinner + " Refreshing"))
 		}
 	}
 
 	s.WriteString("\n")
-	s.WriteString(helpStyle.Render(truncateToWidth("  ?: help · /: filter · v: view · enter: checkout · q: quit", rowWidth)))
+	s.WriteString(lp.help.Render(truncateToWidth("  ?: help · /: filter · v: view · enter: checkout · q: quit", rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()
 }
 
+// listPainters holds the cached painters for one list frame.
+type listPainters struct {
+	dim, loading, filter, help               painter
+	caret, selNormal, selAuthor, selReviewer painter
+	selBranch, selAdds, selDels              painter
+	normal, reviewer, branch, adds, dels     painter
+	badge, selBadge                          [6]painter
+}
+
+func newListPainters() listPainters {
+	lp := listPainters{
+		dim:         sty("240", "", false, false),
+		loading:     sty("214", "", false, false),
+		filter:      sty("220", "", true, false),
+		help:        sty("241", "", false, false),
+		caret:       sty("33", "", true, false),
+		selNormal:   sty("15", "", true, false),
+		selAuthor:   sty("", "", true, false),
+		selReviewer: sty("221", "", true, false),
+		selBranch:   sty("183", "", true, false),
+		selAdds:     sty("114", "", true, false),
+		selDels:     sty("203", "", true, false),
+		normal:      sty("252", "", false, false),
+		reviewer:    sty("214", "", false, false),
+		branch:      sty("141", "", false, false),
+		adds:        sty("78", "", false, false),
+		dels:        sty("196", "", false, false),
+	}
+	for k := range badgeLabels {
+		lp.badge[k] = sty(badgeColors[k], "", false, false)
+		lp.selBadge[k] = sty(badgeSelColors[k], "", true, false)
+	}
+	return lp
+}
+
+const spaceRun = "                                                                                "
+
+func spaces(n int) string {
+	if n <= len(spaceRun) {
+		return spaceRun[:n]
+	}
+	return strings.Repeat(" ", n)
+}
+
+// isPlainASCII reports whether every byte is printable ASCII, where width == len.
+func isPlainASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 func displayWidth(s string) int {
+	if isPlainASCII(s) {
+		return len(s)
+	}
 	return lipgloss.Width(s)
 }
 
 func truncate(s string, max int) string {
+	if isPlainASCII(s) {
+		if len(s) <= max {
+			return s
+		}
+		if max > 3 {
+			return s[:max-3] + "..."
+		}
+		return "..."
+	}
 	if displayWidth(s) <= max {
 		return s
 	}
@@ -1962,20 +2022,31 @@ func truncate(s string, max int) string {
 	return "..."
 }
 
-func pad(s string, width int) string {
+// padW pads s to width and returns the resulting display width.
+func padW(s string, width int) (string, int) {
 	w := displayWidth(s)
 	if w >= width {
-		return s
+		return s, w
 	}
-	return s + strings.Repeat(" ", width-w)
+	return s + spaces(width-w), width
+}
+
+func padLeftW(s string, width int) (string, int) {
+	w := displayWidth(s)
+	if w >= width {
+		return s, w
+	}
+	return spaces(width-w) + s, width
+}
+
+func pad(s string, width int) string {
+	out, _ := padW(s, width)
+	return out
 }
 
 func padLeft(s string, width int) string {
-	w := displayWidth(s)
-	if w >= width {
-		return s
-	}
-	return strings.Repeat(" ", width-w) + s
+	out, _ := padLeftW(s, width)
+	return out
 }
 
 func truncateToWidth(s string, max int) string {
@@ -1994,7 +2065,8 @@ func truncateToWidth(s string, max int) string {
 
 func stripAnsi(s string) string {
 	// Simple ANSI stripper for badge text
-	result := ""
+	var b strings.Builder
+	b.Grow(len(s))
 	inEscape := false
 	for _, r := range s {
 		if r == '\x1b' {
@@ -2007,9 +2079,9 @@ func stripAnsi(s string) string {
 			}
 			continue
 		}
-		result += string(r)
+		b.WriteRune(r)
 	}
-	return result
+	return b.String()
 }
 
 func main() {

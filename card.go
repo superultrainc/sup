@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour"
+	glamouransi "github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -87,6 +88,15 @@ func markdownLines(body string, width int) []string {
 		zero := uint(0)
 		cfg.Document.Margin = &zero
 		cfg.Document.BlockPrefix, cfg.Document.BlockSuffix = "", ""
+		// Match GitHub: plain bold headings and subtle inline code.
+		th := currentDiffTheme()
+		text, chipBg := th.text, th.chipBg
+		bold := true
+		for _, h := range []*glamouransi.StyleBlock{&cfg.H1, &cfg.H2, &cfg.H3, &cfg.H4, &cfg.H5, &cfg.H6} {
+			h.Prefix, h.Suffix = "", ""
+			h.Color, h.BackgroundColor, h.Bold = &text, nil, &bold
+		}
+		cfg.Code.Color, cfg.Code.BackgroundColor = &text, &chipBg
 		r, _ = glamour.NewTermRenderer(glamour.WithStyles(cfg), glamour.WithWordWrap(width), glamour.WithEmoji())
 		mdRenderers[width] = r
 	}

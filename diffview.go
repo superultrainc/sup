@@ -11,6 +11,8 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -27,6 +29,9 @@ type diffTheme struct {
 	delBg, delEmph, delBar, delNum string
 	sepBg, sepFg, numFg, emptyBg   string
 	divider, border, threadBorder  string
+	text, muted, band, authorBand  string // GitHub's text, secondary text, and comment-header fills
+	chipBg, branchFg, branchBg     string
+	accent                         string // active tab underline
 }
 
 // Colors follow GitHub's diff palette, pre-blended onto its page background.
@@ -36,6 +41,8 @@ var darkDiffTheme = diffTheme{
 	delBg: "#2a1418", delEmph: "#6e2229", delBar: "#f85149", delNum: "#ffa198",
 	sepBg: "#161b22", sepFg: "#8b949e", numFg: "#6e7681", emptyBg: "#14181f",
 	divider: "#30363d", border: "#3d444d", threadBorder: "#d29922",
+	text: "#e6edf3", muted: "#8b949e", band: "#161b22", authorBand: "#13233a",
+	chipBg: "#30363d", branchFg: "#58a6ff", branchBg: "#121d2f", accent: "#f78166",
 }
 
 var lightDiffTheme = diffTheme{
@@ -44,6 +51,8 @@ var lightDiffTheme = diffTheme{
 	delBg: "#ffebe9", delEmph: "#ffc1bf", delBar: "#cf222e", delNum: "#cf222e",
 	sepBg: "#f6f8fa", sepFg: "#57606a", numFg: "#8c959f", emptyBg: "#f6f8fa",
 	divider: "#d0d7de", border: "#d0d7de", threadBorder: "#bf8700",
+	text: "#1f2328", muted: "#59636e", band: "#f6f8fa", authorBand: "#ddf4ff",
+	chipBg: "#d1d9e0", branchFg: "#0969da", branchBg: "#ddf4ff", accent: "#fd8c73",
 }
 
 func currentDiffTheme() diffTheme {
@@ -223,6 +232,7 @@ type diffRenderer struct {
 	split       bool
 	wrap        bool
 	collapsed   map[string]bool
+	noSummary   bool // the file tree replaces the summary card
 	threads     []reviewThread
 	lines       []string
 	fileMarks   []int
@@ -261,16 +271,32 @@ func (r *diffRenderer) isCollapsed(f *diffFile) bool {
 	return isGeneratedPath(f.path()) || f.lineCount() > 1500
 }
 
-func fileStatusBadge(f *diffFile) string {
+func statusLetter(f *diffFile) string {
 	switch f.status {
 	case "added":
-		return approvedStyle.Render("A")
+		return "A"
 	case "deleted":
-		return changesRequestedStyle.Render("D")
+		return "D"
 	case "renamed":
-		return commentedStyle.Render("R")
+		return "R"
 	}
-	return reviewRequestedStyle.Render("M")
+	return "M"
+}
+
+func statusColor(f *diffFile, th diffTheme) string {
+	switch f.status {
+	case "added":
+		return th.addBar
+	case "deleted":
+		return th.delBar
+	case "renamed":
+		return th.branchFg
+	}
+	return th.threadBorder
+}
+
+func fileStatusBadge(f *diffFile) string {
+	return sty(statusColor(f, currentDiffTheme()), "", true, false).Render(statusLetter(f))
 }
 
 func (r *diffRenderer) threadsFor(f *diffFile) []reviewThread {
@@ -292,8 +318,9 @@ func (r *diffRenderer) summary(files []*diffFile) {
 		addW = max(addW, len(fmt.Sprintf("+%d", f.additions)))
 		delW = max(delW, len(fmt.Sprintf("-%d", f.deletions)))
 	}
-	title := sectionHeadStyle.Render("Files") + metaStyle.Render(fmt.Sprintf(" · %d changed · ", len(files))) +
-		additionsStyle.Render(fmt.Sprintf("+%d", adds)) + " " + deletionsStyle.Render(fmt.Sprintf("-%d", dels))
+	band := r.th.band
+	left := sty(r.th.text, band, true, false).Render("Files changed") + sty(r.th.muted, band, false, false).Render(fmt.Sprintf(" %d", len(files)))
+	right := sty(r.th.addBar, band, false, false).Render(fmt.Sprintf("+%d", adds)) + sty(r.th.delBar, band, false, false).Render(fmt.Sprintf(" −%d", dels))
 	var body []string
 	for _, f := range files {
 		line := fileStatusBadge(f) + "  " +
@@ -304,7 +331,7 @@ func (r *diffRenderer) summary(files []*diffFile) {
 		}
 		body = append(body, line)
 	}
-	for _, l := range textCard(title, r.th.border, body, r.width) {
+	for _, l := range bandCard(left, right, body, r.width, r.th.border, band) {
 		r.emit(l)
 	}
 }
@@ -314,9 +341,13 @@ func (r *diffRenderer) render(files []*diffFile) {
 		r.emit(metaStyle.Render("No file changes."))
 		return
 	}
-	r.summary(files)
-	for _, f := range files {
-		r.emit("")
+	if !r.noSummary {
+		r.summary(files)
+	}
+	for i, f := range files {
+		if i > 0 || !r.noSummary {
+			r.emit("")
+		}
 		r.fileMarks = append(r.fileMarks, len(r.lines))
 		r.file(f)
 	}
@@ -583,19 +614,21 @@ func (r *diffRenderer) thread(t reviewThread, label string) {
 	r.row("")
 }
 
-// threadCard draws a review thread; snippet rows (code context) go above the comments.
+// threadCard draws a review thread with GitHub's shaded header.
 func threadCard(t reviewThread, label string, snippet []string, width int, th diffTheme) []string {
 	border := th.threadBorder
 	if t.IsResolved {
 		border = th.border
 	}
 	first := t.Comments.Nodes[0]
-	title := authorStyle.Render(first.Author.Login) + metaStyle.Render(" · "+relTime(first.CreatedAt))
+	left := sty(th.text, th.band, true, false).Render(first.Author.Login) +
+		sty(th.muted, th.band, false, false).Render(" commented "+relTime(first.CreatedAt))
 	if label != "" {
-		title += metaStyle.Render(" · " + label)
+		left += sty(th.muted, th.band, false, false).Render(" · " + label)
 	}
+	right := ""
 	if t.IsResolved {
-		title += " " + approvedStyle.Render("✓ resolved")
+		right = sty(th.addBar, th.band, false, false).Render("✓ Resolved")
 	}
 	body := snippet
 	if len(snippet) > 0 {
@@ -604,15 +637,15 @@ func threadCard(t reviewThread, label string, snippet []string, width int, th di
 	for i, c := range t.Comments.Nodes {
 		if i > 0 {
 			body = append(body, sty(th.divider, "", false, false).Render(strings.Repeat("┄", width-4)))
-			body = append(body, authorStyle.Render(c.Author.Login)+metaStyle.Render(" · "+relTime(c.CreatedAt)))
+			body = append(body, sty(th.text, "", true, false).Render(c.Author.Login)+sty(th.muted, "", false, false).Render(" "+relTime(c.CreatedAt)))
 		}
 		md := markdownLines(c.Body, width-4)
 		if len(md) == 0 {
-			md = []string{metaStyle.Render("(empty)")}
+			md = []string{sty(th.muted, "", false, true).Render("(empty)")}
 		}
 		body = append(body, md...)
 	}
-	return textCard(title, border, body, width)
+	return bandCard(left, right, body, width, border, th.band)
 }
 
 type prPatchFetchedMsg struct {
@@ -676,4 +709,71 @@ func fetchPRPatch(pr PR) ([]byte, error) {
 		return nil, fmt.Errorf("diff %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	return data, nil
+}
+
+// fileTree is the Files tab's left column: files grouped under their
+// directory, with the file at the top of the diff highlighted.
+func fileTree(files []*diffFile, current int, d *prDetail, width, height int) []string {
+	th := currentDiffTheme()
+	muted := sty(th.muted, "", false, false)
+	threads := map[string]int{}
+	if d != nil {
+		for _, t := range d.ReviewThreads.Nodes {
+			threads[t.Path]++
+		}
+	}
+
+	type row struct {
+		text string
+		file int
+	}
+	var rows []row
+	prevDir := ""
+	curRow := 0
+	for i, f := range files {
+		dir := filepath.Dir(f.path())
+		if dir == "." {
+			dir = ""
+		}
+		if dir != prevDir && dir != "" {
+			rows = append(rows, row{muted.Render(truncate("▾ "+dir, width-1)), -1})
+		}
+		prevDir = dir
+		indent := " "
+		if dir != "" {
+			indent = "   "
+		}
+		bg := ""
+		if i == current {
+			bg = th.band
+			curRow = len(rows)
+		}
+		stats := sty(th.addBar, bg, false, false).Render(fmt.Sprintf("+%d", f.additions)) +
+			sty(th.delBar, bg, false, false).Render(fmt.Sprintf(" −%d", f.deletions))
+		if n := threads[f.path()]; n > 0 {
+			stats = sty(th.threadBorder, bg, false, false).Render(fmt.Sprintf("◆%d ", n)) + stats
+		}
+		name := filepath.Base(f.path())
+		nameW := width - len(indent) - 3 - lipgloss.Width(stats) - 2
+		slot := sty("", bg, false, false).Render(" ")
+		if i == current {
+			slot = sty(th.accent, bg, true, false).Render("▎")
+		}
+		left := slot + sty(th.text, bg, false, false).Render(indent[1:]) + sty(statusColor(f, th), bg, true, false).Render(statusLetter(f)) +
+			sty(th.text, bg, i == current, false).Render(" "+truncate(name, max(nameW, 4)))
+		gap := width - lipgloss.Width(left) - lipgloss.Width(stats) - 1
+		line := left + sty("", bg, false, false).Render(strings.Repeat(" ", max(gap, 1))) + stats + sty("", bg, false, false).Render(" ")
+		rows = append(rows, row{ansi.Truncate(line, width, ""), i})
+	}
+
+	out := []string{sty(th.muted, "", true, false).Render(" Files ") + chip(fmt.Sprint(len(files)), th.text, th.chipBg), ""}
+	listH := max(height-len(out), 1)
+	start := 0
+	if curRow >= listH {
+		start = min(curRow-listH/2, len(rows)-listH)
+	}
+	for _, r := range rows[max(start, 0):min(max(start, 0)+listH, len(rows))] {
+		out = append(out, r.text)
+	}
+	return out
 }

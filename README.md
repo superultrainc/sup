@@ -116,7 +116,7 @@ The mouse works too: click a tab to switch, click a file in the tree to jump to 
 
 Images in descriptions and comments render inline. Terminals with the kitty graphics protocol and Unicode placeholders (kitty, Ghostty, Rex) get full-resolution images; others get a truecolor half-block preview. Detection is automatic; set `SUP_IMAGES=kitty` or `SUP_IMAGES=blocks` to force one.
 
-PRs open instantly once cached: sup prefetches the PR under the cursor, keeps a disk cache in `~/.cache/sup/prs`, and refreshes in the background. The diff is only refetched when the PR's head commit changes.
+PRs open instantly once cached. In the background, sup warms every listed PR (nearest the cursor first), keeps a disk cache in `~/.cache/sup/prs`, and refreshes what's open. A PR is only refetched when its `updatedAt` changes, and its diff only when the head commit does.
 
 ## Configuration (optional)
 

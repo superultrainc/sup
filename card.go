@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
@@ -11,13 +10,31 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// styleCache avoids rebuilding a lipgloss.Style per highlighted token.
-var styleCache = map[[4]string]lipgloss.Style{}
+// painter wraps text in a style's escape codes. lipgloss.Style.Render is
+// too slow for per-token use (it copies a large struct and re-measures),
+// so each style is rendered once around a marker and the codes reused.
+type painter struct{ prefix, suffix string }
 
-func sty(fg, bg string, bold, italic bool) lipgloss.Style {
-	key := [4]string{fg, bg, fmt.Sprint(bold), fmt.Sprint(italic)}
-	if s, ok := styleCache[key]; ok {
+func (p painter) Render(s string) string {
+	if p.prefix == "" || s == "" {
 		return s
+	}
+	return p.prefix + s + p.suffix
+}
+
+const paintMarker = ""
+
+type styleKey struct {
+	fg, bg       string
+	bold, italic bool
+}
+
+var styleCache = map[styleKey]painter{}
+
+func sty(fg, bg string, bold, italic bool) painter {
+	key := styleKey{fg, bg, bold, italic}
+	if p, ok := styleCache[key]; ok {
+		return p
 	}
 	s := lipgloss.NewStyle().Bold(bold).Italic(italic)
 	if fg != "" {
@@ -26,8 +43,13 @@ func sty(fg, bg string, bold, italic bool) lipgloss.Style {
 	if bg != "" {
 		s = s.Background(lipgloss.Color(bg))
 	}
-	styleCache[key] = s
-	return s
+	var p painter
+	// Rendering through lipgloss keeps its color-profile downgrade (256/16 colors).
+	if before, after, ok := strings.Cut(s.Render(paintMarker), paintMarker); ok {
+		p = painter{before, after}
+	}
+	styleCache[key] = p
+	return p
 }
 
 // fitWidth truncates or pads s to exactly w cells.

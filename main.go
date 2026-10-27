@@ -24,15 +24,18 @@ var (
 	currentUser string   // Authenticated GitHub username
 	ghToken     string   // Cached `gh auth token` for direct HTTP calls
 
-	httpClient = &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:        20,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     90 * time.Second,
-		},
-	}
+	httpClient = &http.Client{Timeout: 30 * time.Second, Transport: newTransport()}
 )
+
+// newTransport starts from the default transport so HTTP/2 stays on: parallel
+// GitHub requests then share one TLS connection instead of a handshake each.
+func newTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 20
+	t.MaxIdleConnsPerHost = 20
+	t.IdleConnTimeout = 90 * time.Second
+	return t
+}
 
 func tokenCachePath() string { return filepath.Join(cacheDir(), "token") }
 
@@ -192,13 +195,14 @@ func savePRsToCache(prs []PR) {
 }
 
 type PR struct {
-	Number      int    `json:"number"`
-	Title       string `json:"title"`
-	HeadRefName string `json:"headRefName"`
-	HeadRefOid  string `json:"headRefOid"`
-	IsDraft     bool   `json:"isDraft"`
-	Additions   int    `json:"additions"`
-	Deletions   int    `json:"deletions"`
+	Number      int       `json:"number"`
+	Title       string    `json:"title"`
+	HeadRefName string    `json:"headRefName"`
+	HeadRefOid  string    `json:"headRefOid"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	IsDraft     bool      `json:"isDraft"`
+	Additions   int       `json:"additions"`
+	Deletions   int       `json:"deletions"`
 	Author      struct {
 		Login string `json:"login"`
 	} `json:"author"`
@@ -260,6 +264,8 @@ type model struct {
 	detail            *prDetailView   // non-nil while the full PR view is open
 	cache             map[string]*prCacheEntry
 	hoverSeq          int // invalidates pending prefetch ticks when the cursor moves
+	warmQueue         []PR
+	warmInFlight      int
 }
 
 type prPageLoadedMsg struct {
@@ -572,6 +578,7 @@ func fetchShardPage(shardIdx int, after string, refreshID int) tea.Cmd {
 						title
 						headRefName
 						headRefOid
+						updatedAt
 						isDraft
 						additions
 						deletions
@@ -680,6 +687,7 @@ func fetchSinglePRCmd(pr PR) tea.Cmd {
 					title
 					headRefName
 					headRefOid
+					updatedAt
 					isDraft
 					additions
 					deletions
@@ -795,7 +803,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case imagesLoadedMsg:
 		handleImagesLoaded(msg)
 		if m.detail != nil {
-			m.detail.rebuild(m.width)
+			m.detail.rebuildForImages()
 			m.detail.clampScroll(m.height)
 		}
 		return m, nil
@@ -821,7 +829,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleMergeDone(msg)
 
 	case startRefreshMsg:
-		return m, tea.Batch(m.startRefresh(), m.schedulePrefetch())
+		return m, tea.Batch(m.startRefresh(), m.schedulePrefetch(), m.enqueueWarm())
+
+	case warmDoneMsg:
+		return m, m.handleWarmDone(msg)
 
 	case prPageLoadedMsg:
 		// Stale message from a prior refresh — ignore.
@@ -887,6 +898,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.visibleCount = len(m.filtered)
 
+		// Fresh updatedAt/head values: re-warm anything that changed.
+		if !m.refreshing {
+			return m, tea.Batch(next, m.enqueueWarm())
+		}
 		return m, next
 
 	case tickMsg:

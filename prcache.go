@@ -136,8 +136,7 @@ func (m *model) handleDetailFetched(msg prDetailFetchedMsg) tea.Cmd {
 	v.loading = false
 	v.err = msg.err
 	if msg.err == nil && (changed || v.detail == nil) {
-		v.detail = msg.detail
-		v.rebuild(m.width)
+		v.applyDetail(msg.detail)
 		v.clampScroll(m.height)
 	}
 	return images
@@ -205,28 +204,36 @@ type diskCacheLoadedMsg struct {
 // loadDiskCacheCmd parses and highlights a cached PR off the UI goroutine.
 func loadDiskCacheCmd(pr PR) tea.Cmd {
 	return func() tea.Msg {
-		key := prKey(pr)
-		data, err := os.ReadFile(diskCachePath(key))
-		if err != nil || demoMode {
-			return nil
+		if msg, ok := readDiskCache(pr); ok {
+			return msg
 		}
-		var de diskCacheEntry
-		if json.Unmarshal(data, &de) != nil {
-			return nil
-		}
-		msg := diskCacheLoadedMsg{key: key, raw: de.Detail, detailAt: de.DetailAt, patch: de.Patch, head: de.Head}
-		if len(de.Detail) > 0 {
-			var d prDetail
-			if json.Unmarshal(de.Detail, &d) == nil {
-				msg.detail = &d
-			}
-		}
-		if de.Patch != "" {
-			msg.files = parseUnifiedDiff(de.Patch)
-			highlightFiles(msg.files)
-		}
-		return msg
+		return nil
 	}
+}
+
+// readDiskCache loads and parses a cached PR; call it off the UI goroutine.
+func readDiskCache(pr PR) (diskCacheLoadedMsg, bool) {
+	key := prKey(pr)
+	data, err := os.ReadFile(diskCachePath(key))
+	if err != nil || demoMode {
+		return diskCacheLoadedMsg{}, false
+	}
+	var de diskCacheEntry
+	if json.Unmarshal(data, &de) != nil {
+		return diskCacheLoadedMsg{}, false
+	}
+	msg := diskCacheLoadedMsg{key: key, raw: de.Detail, detailAt: de.DetailAt, patch: de.Patch, head: de.Head}
+	if len(de.Detail) > 0 {
+		var d prDetail
+		if json.Unmarshal(de.Detail, &d) == nil {
+			msg.detail = &d
+		}
+	}
+	if de.Patch != "" {
+		msg.files = parseUnifiedDiff(de.Patch)
+		highlightFiles(msg.files)
+	}
+	return msg, true
 }
 
 // handleDiskCacheLoaded fills gaps only; network results always win.
@@ -244,19 +251,14 @@ func (m *model) handleDiskCacheLoaded(msg diskCacheLoadedMsg) tea.Cmd {
 	if v == nil || prKey(v.pr) != msg.key {
 		return images
 	}
-	rebuilt := false
 	if v.detail == nil && e.detail != nil {
-		v.detail = e.detail
-		rebuilt = true
+		v.applyDetail(e.detail)
 	}
 	if v.diff == nil && e.files != nil {
 		v.diff = e.files
-		rebuilt = true
+		v.rebuildFilesKeepingPlace()
 	}
-	if rebuilt {
-		v.rebuild(m.width)
-		v.clampScroll(m.height)
-	}
+	v.clampScroll(m.height)
 	return images
 }
 

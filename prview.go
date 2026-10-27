@@ -135,6 +135,7 @@ type prDetail struct {
 	ReviewDecision string    `json:"reviewDecision"`
 	Mergeable      string    `json:"mergeable"`
 	HeadRefOid     string    `json:"headRefOid"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 	// mergeStateStatus is GitHub's merge-button state: CLEAN, BLOCKED, BEHIND, DIRTY, UNSTABLE, HAS_HOOKS, DRAFT, UNKNOWN.
 	MergeStateStatus      string `json:"mergeStateStatus"`
 	ViewerCanMergeAsAdmin bool   `json:"viewerCanMergeAsAdmin"`
@@ -198,7 +199,7 @@ const prDetailQuery = `{
 			title body bodyHTML url state isDraft createdAt
 			author { login }
 			baseRefName headRefName additions deletions changedFiles reviewDecision mergeable
-			headRefOid mergeStateStatus viewerCanMergeAsAdmin
+			headRefOid updatedAt mergeStateStatus viewerCanMergeAsAdmin
 			autoMergeRequest { mergeMethod }
 			repository { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerDefaultMergeMethod }
 			labels(first: 20) { nodes { name color } }
@@ -417,6 +418,55 @@ func (v *prDetailView) isSplit() bool {
 		return false
 	}
 	return v.mainWidth(tabFiles) >= 150
+}
+
+// applyDetail swaps in new PR data, re-rendering the diff only when review
+// threads (the one thing it shows from the detail) changed; that pane is the expensive one.
+func (v *prDetailView) applyDetail(d *prDetail) {
+	threadsChanged := v.detail == nil || threadsKey(v.detail) != threadsKey(d)
+	v.detail = d
+	v.width = max(v.width, 40)
+	v.rebuildConv()
+	v.rebuildCommits()
+	v.rebuildChecks()
+	if threadsChanged {
+		v.rebuildFilesKeepingPlace()
+	}
+	v.refreshSearch()
+}
+
+// rebuildForImages re-renders the panes that can show the newly loaded images.
+func (v *prDetailView) rebuildForImages() {
+	v.width = max(v.width, 40)
+	v.rebuildConv()
+	if v.detail != nil {
+		for _, t := range v.detail.ReviewThreads.Nodes {
+			for _, c := range t.Comments.Nodes {
+				if len(findImages(c.Body)) > 0 {
+					v.rebuildFilesKeepingPlace()
+					v.refreshSearch()
+					return
+				}
+			}
+		}
+	}
+	v.refreshSearch()
+}
+
+// threadsKey summarizes what the diff pane renders from review threads.
+func threadsKey(d *prDetail) string {
+	var sb strings.Builder
+	for _, t := range d.ReviewThreads.Nodes {
+		line := 0
+		if t.Line != nil {
+			line = *t.Line
+		}
+		fmt.Fprintf(&sb, "%s:%d:%v:%v|", t.Path, line, t.IsResolved, t.IsOutdated)
+		for _, c := range t.Comments.Nodes {
+			sb.WriteString(c.Author.Login + "\x00" + c.Body + "\x00")
+		}
+	}
+	return sb.String()
 }
 
 func (v *prDetailView) rebuild(width int) {

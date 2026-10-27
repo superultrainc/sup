@@ -91,9 +91,9 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 `v` opens a full-screen view of the selected PR, laid out like GitHub's PR page. `tab` / `shift+tab` or `1`–`4` switch tabs:
 
 - **Conversation**: the description, then a timeline of comments, reviews, pushed commits, and review threads (resolved ones folded), ending with a merge box (review, checks, conflicts). Reviewers, assignees, and labels sit in a sidebar on wide terminals.
+- **Files changed**: syntax-highlighted diff with word-level change highlights and review threads inline under their lines, plus a file tree on wide terminals. Lockfiles and very large diffs start collapsed.
 - **Commits**: commits grouped by day.
 - **Checks**: every check on the latest commit, failures first.
-- **Files changed**: syntax-highlighted diff with word-level change highlights and review threads inline under their lines, plus a file tree on wide terminals. Lockfiles and very large diffs start collapsed.
 
 | Key | Action |
 |-----|--------|

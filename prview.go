@@ -282,12 +282,12 @@ type detailPane struct {
 	scroll int
 }
 
-// Tabs follow GitHub's PR page order.
+// Tab order; the diff comes right after the conversation.
 const (
 	tabConversation = iota
+	tabFiles
 	tabCommits
 	tabChecks
-	tabFiles
 	tabCount
 )
 

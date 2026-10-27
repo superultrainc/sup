@@ -58,7 +58,12 @@ func rightAlign(left, right string, width int) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
-var tabNames = [tabCount]string{"Conversation", "Commits", "Checks", "Files changed"}
+var tabNames = [tabCount]string{
+	tabConversation: "Conversation",
+	tabFiles:        "Files changed",
+	tabCommits:      "Commits",
+	tabChecks:       "Checks",
+}
 
 func (v *prDetailView) tabCounts() [tabCount]int {
 	var c [tabCount]int

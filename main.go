@@ -1883,7 +1883,8 @@ func (m model) View() string {
 			s.WriteString("\n")
 		}
 
-		if m.filterText != "" {
+		// Any filter (repo, status, author, text) narrows the list, so count what's shown.
+		if len(m.filtered) != len(m.prs) {
 			s.WriteString(fmt.Sprintf("\n  %d of %d PRs", len(m.filtered), len(m.prs)))
 		} else {
 			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))

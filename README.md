@@ -90,7 +90,7 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 
 `v` opens a full-screen view of the selected PR with two tabs (`tab`, or `1`/`2`):
 
-- **Conversation**: description, checks, and a timeline of comments, reviews, and review threads.
+- **Conversation**: description, then a timeline of comments, reviews, and review threads, then checks.
 - **Files changed**: syntax-highlighted diff with word-level change highlights and review threads inline under their lines. Lockfiles and very large diffs start collapsed.
 
 | Key | Action |
@@ -101,10 +101,13 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `s` | Cycle layout: auto → split → unified |
 | `w` | Toggle line wrapping |
 | `x` | Collapse / expand the current file |
+| `r` | Request or remove reviewers (type to filter, `space` toggles, `enter` saves) |
 | `R` | Reload |
 | `esc` | Back to the list |
 
 `d`, `A`, `D`, `M`, `o`, and `c` work from here too.
+
+PRs open instantly once cached: sup prefetches the PR under the cursor, keeps a disk cache in `~/.cache/sup/prs`, and refreshes in the background. The diff is only refetched when the PR's head commit changes.
 
 ## Configuration (optional)
 

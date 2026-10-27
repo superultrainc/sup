@@ -468,7 +468,6 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key := msg.String(); key {
 	case "esc", "q", "backspace", "left":
 		m.detail = nil
-		m.diffError = ""
 		m.actionStatus = ""
 		return m, nil
 	case "tab":
@@ -536,7 +535,9 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		e.detailAt, e.head = time.Time{}, "" // force both to refetch
 		v.loading, v.diffLoading = true, true
 		return m, tea.Batch(append(m.fetchMissing(v.pr, e), spinnerTick())...)
-	case "d", "A", "D", "M", "o", "c":
+	case "d":
+		v.tab = tabFiles
+	case "A", "D", "M", "o", "c":
 		return m.handleNormalInput(msg)
 	}
 	v.clampScroll(m.height)

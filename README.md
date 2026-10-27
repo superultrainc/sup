@@ -17,7 +17,6 @@ A terminal UI for browsing and checking out GitHub PRs.
 ## Requirements
 
 - [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`)
-- [hunk](https://github.com/modem-dev/hunk) (optional, for the `d` keybinding): `npm i -g hunkdiff`
 
 ## Install
 
@@ -78,7 +77,7 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `O` | Open all PRs needing review in browser |
 | `c` | Copy PR link to clipboard |
 | `v` | Full PR view: conversation (description, checks, reviews, comments) and a syntax-highlighted diff with review threads inline |
-| `d` | Review PR diff with [hunk](https://github.com/modem-dev/hunk), with GitHub review comments inline (split by default; press `1`/`2`/`0` inside hunk to flip layout, `a` to toggle comments) |
+| `d` | Open the PR view on its diff (Files changed tab) |
 | `m` | Merge PR: pick squash / merge commit / rebase, delete the branch, or enable auto-merge |
 | `A` | Approve PR (with `y`/`n` confirm) |
 | `D` | Request changes — opens `$EDITOR` for body |
@@ -106,10 +105,11 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `x` | Collapse / expand the current file |
 | `r` | Request or remove reviewers (type to filter, `space` toggles, `enter` saves) |
 | `m` | Merge (`↑`/`↓` method, `b` delete branch, `a` auto-merge, `!` admin bypass when allowed) |
+| `d` | Jump to Files changed |
 | `R` | Reload |
 | `esc` | Back to the list |
 
-`d`, `A`, `D`, `M`, `o`, and `c` work from here too.
+`A`, `D`, `M`, `o`, and `c` work from here too.
 
 PRs open instantly once cached: sup prefetches the PR under the cursor, keeps a disk cache in `~/.cache/sup/prs`, and refreshes in the background. The diff is only refetched when the PR's head commit changes.
 

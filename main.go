@@ -242,9 +242,7 @@ type model struct {
 	width             int
 	height            int
 	loading           bool
-	refreshing        bool // true when fetching new data while showing cached data
-	loadingDiff       bool // true while fetching diff before launching hunk
-	diffError         string
+	refreshing        bool   // true when fetching new data while showing cached data
 	confirmAction     string // non-empty while awaiting y/n confirmation (e.g. "approve")
 	confirmPR         *PR
 	actionPending     bool            // true while a review submission is in flight
@@ -275,18 +273,6 @@ type prPageLoadedMsg struct {
 
 func prKey(pr PR) string {
 	return fmt.Sprintf("%s/%s#%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
-}
-
-type diffFetchedMsg struct {
-	patch       []byte
-	mode        string // "split" or "stack" — passed through to hunk via --mode
-	contextPath string // hunk --agent-context sidecar with review threads; "" if none
-	err         error
-}
-
-type hunkDoneMsg struct {
-	contextPath string
-	err         error
 }
 
 type editorDoneMsg struct {
@@ -659,36 +645,6 @@ func (m *model) startRefresh() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// fetchDiffCmd fetches the patch plus review threads (unless detail is already
-// loaded) so hunk can show them inline. Thread fetch failures are non-fatal.
-func fetchDiffCmd(pr PR, mode string, detail *prDetail) tea.Cmd {
-	return func() tea.Msg {
-		detailCh := make(chan *prDetail, 1)
-		go func() {
-			if detail != nil {
-				detailCh <- detail
-				return
-			}
-			d, _ := fetchPRDetail(pr)
-			detailCh <- d
-		}()
-
-		repoSlug := fmt.Sprintf("%s/%s", pr.Repository.Owner.Login, pr.Repository.Name)
-		cmd := exec.Command("gh", "pr", "diff", fmt.Sprintf("%d", pr.Number), "--repo", repoSlug)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			msg := strings.TrimSpace(stderr.String())
-			if msg == "" {
-				msg = err.Error()
-			}
-			return diffFetchedMsg{mode: mode, err: fmt.Errorf("%s", msg)}
-		}
-		return diffFetchedMsg{patch: out, mode: mode, contextPath: writeHunkContext(<-detailCh)}
-	}
-}
-
 func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 	return func() tea.Msg {
 		repoSlug := fmt.Sprintf("%s/%s", pr.Repository.Owner.Login, pr.Repository.Name)
@@ -928,7 +884,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		if m.loading || m.refreshing || m.loadingDiff || m.actionPending || (m.detail != nil && (m.detail.loading || m.detail.diffLoading ||
+		if m.loading || m.refreshing || m.actionPending || (m.detail != nil && (m.detail.loading || m.detail.diffLoading ||
 			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)) ||
 			(m.detail.merge != nil && m.detail.merge.saving))) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
@@ -1001,35 +957,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyFilterKeepingCursor()
 		if !demoMode {
 			savePRsToCache(m.prs)
-		}
-		return m, nil
-
-	case diffFetchedMsg:
-		m.loadingDiff = false
-		if msg.err != nil {
-			m.diffError = msg.err.Error()
-			return m, nil
-		}
-		args := []string{"patch"}
-		if msg.mode != "" {
-			args = append(args, "--mode", msg.mode)
-		}
-		if msg.contextPath != "" {
-			args = append(args, "--agent-context", msg.contextPath, "--agent-notes")
-		}
-		args = append(args, "-")
-		hunk := exec.Command("hunk", args...)
-		hunk.Stdin = bytes.NewReader(msg.patch)
-		return m, tea.ExecProcess(hunk, func(err error) tea.Msg {
-			return hunkDoneMsg{contextPath: msg.contextPath, err: err}
-		})
-
-	case hunkDoneMsg:
-		if msg.contextPath != "" {
-			os.Remove(msg.contextPath)
-		}
-		if msg.err != nil {
-			m.diffError = fmt.Sprintf("hunk error: %v", msg.err)
 		}
 		return m, nil
 
@@ -1332,7 +1259,6 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Any key dismisses transient feedback from a previous action.
-	m.diffError = ""
 	m.actionStatus = ""
 
 	switch msg.String() {
@@ -1420,26 +1346,16 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "d":
-		if m.loadingDiff {
-			return m, nil
-		}
-		if pr, ok := m.currentPR(); ok {
-			if _, err := exec.LookPath("hunk"); err != nil {
-				m.diffError = "hunk not installed — npm i -g hunkdiff"
-				return m, nil
-			}
-			var detail *prDetail
-			if m.detail != nil {
-				detail = m.detail.detail
-			}
-			m.diffError = ""
-			m.loadingDiff = true
-			return m, tea.Batch(fetchDiffCmd(pr, "split", detail), spinnerTick())
+		// Opens the PR view straight on its diff.
+		if pr, ok := m.currentPR(); ok && m.detail == nil {
+			cmd := m.openDetail(pr)
+			m.detail.tab = tabFiles
+			return m, cmd
 		}
 		return m, nil
 
 	case "A":
-		if m.actionPending || m.loadingDiff {
+		if m.actionPending {
 			return m, nil
 		}
 		if pr, ok := m.currentPR(); ok {
@@ -1449,7 +1365,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "D":
-		if m.actionPending || m.loadingDiff {
+		if m.actionPending {
 			return m, nil
 		}
 		if pr, ok := m.currentPR(); ok {
@@ -1463,7 +1379,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "M":
-		if m.actionPending || m.loadingDiff {
+		if m.actionPending {
 			return m, nil
 		}
 		if pr, ok := m.currentPR(); ok {
@@ -1678,7 +1594,7 @@ func (m model) helpView() string {
 			{"Enter", "Checkout PR"},
 			{"v", "Full PR view (conversation + highlighted diff)"},
 			{"m", "Merge PR"},
-			{"d", "Review diff with inline comments (hunk: 1=split · 2=stack · 0=auto)"},
+			{"d", "Open the PR's diff"},
 			{"A", "Approve"},
 			{"D", "Request changes"},
 			{"M", "Comment"},
@@ -1781,8 +1697,6 @@ func (m model) View() string {
 			style = changesRequestedStyle
 		}
 		s.WriteString(style.Render("  " + m.actionStatus))
-	case m.diffError != "":
-		s.WriteString(changesRequestedStyle.Render("  " + m.diffError))
 	case filterLine == "  ":
 		s.WriteString(filterLine)
 	default:
@@ -1907,9 +1821,6 @@ func (m model) View() string {
 		} else if m.refreshing {
 			spinner := spinnerFrames[m.spinnerFrame]
 			s.WriteString(loadingStyle.Render("  " + spinner + " Refreshing"))
-		} else if m.loadingDiff {
-			spinner := spinnerFrames[m.spinnerFrame]
-			s.WriteString(loadingStyle.Render("  " + spinner + " Loading diff..."))
 		}
 	}
 

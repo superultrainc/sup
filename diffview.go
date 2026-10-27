@@ -704,7 +704,7 @@ func fetchPRPatch(pr PR) ([]byte, error) {
 	}
 	if resp.StatusCode >= 400 {
 		if resp.StatusCode == 406 {
-			return nil, fmt.Errorf("diff too large for the GitHub API — press d to open in hunk")
+			return nil, fmt.Errorf("diff too large for the GitHub API — press o to view it on GitHub")
 		}
 		return nil, fmt.Errorf("diff %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}

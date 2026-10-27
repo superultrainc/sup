@@ -237,16 +237,12 @@ func (m model) detailFooter() string {
 		status = filterStyle.Render(fmt.Sprintf(" Approve PR #%d? (y/n)", m.confirmPR.Number))
 	case m.actionPending:
 		status = reviewRequestedStyle.Render(" " + spinnerFrames[m.spinnerFrame] + " Submitting review...")
-	case m.loadingDiff:
-		status = reviewRequestedStyle.Render(" " + spinnerFrames[m.spinnerFrame] + " Loading diff...")
 	case m.actionStatus != "":
 		style := approvedStyle
 		if strings.HasPrefix(m.actionStatus, "Error") || strings.Contains(m.actionStatus, "cancelled") {
 			style = changesRequestedStyle
 		}
 		status = style.Render(" " + m.actionStatus)
-	case m.diffError != "":
-		status = changesRequestedStyle.Render(" " + m.diffError)
 	case v.err != nil && v.detail != nil:
 		status = changesRequestedStyle.Render(" Reload failed: " + v.err.Error())
 	case (v.loading && v.detail != nil) || (v.diffLoading && v.diff != nil):
@@ -266,7 +262,7 @@ func (m model) detailFooter() string {
 	case v.tab == tabFiles:
 		help = " j/k scroll · [/] file · n/N comment · s layout · w wrap · x collapse · tab next tab · esc back"
 	default:
-		help = " j/k scroll · [/] next item · tab next tab · m merge · r reviewers · A approve · D changes · M comment · d hunk · o open · esc back"
+		help = " j/k scroll · [/] next item · tab next tab · m merge · r reviewers · A approve · D changes · M comment · o open · esc back"
 	}
 	return status + "\n" + helpStyle.Render(truncateToWidth(help+"  "+pct, max(m.width-1, 20)))
 }

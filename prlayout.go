@@ -163,6 +163,8 @@ func (m model) detailView() string {
 	switch {
 	case v.picker != nil:
 		rows = m.pickerView(bodyH)
+	case v.merge != nil:
+		rows = m.mergeView(bodyH)
 	case v.tab != tabFiles && v.detail == nil:
 		rows = []string{"", m.placeholder(v.err, "Loading PR...")}
 	case v.tab == tabFiles && v.diff == nil:
@@ -259,10 +261,12 @@ func (m model) detailFooter() string {
 	switch {
 	case v.picker != nil:
 		help = " ↑/↓ move · space toggle · type to filter · enter save · esc cancel"
+	case v.merge != nil:
+		help = " ↑/↓ method · b delete branch · a auto-merge · enter merge · esc cancel"
 	case v.tab == tabFiles:
 		help = " j/k scroll · [/] file · n/N comment · s layout · w wrap · x collapse · tab next tab · esc back"
 	default:
-		help = " j/k scroll · [/] next item · tab next tab · r reviewers · d hunk · A approve · D changes · M comment · o open · esc back"
+		help = " j/k scroll · [/] next item · tab next tab · m merge · r reviewers · A approve · D changes · M comment · d hunk · o open · esc back"
 	}
 	return status + "\n" + helpStyle.Render(truncateToWidth(help+"  "+pct, max(m.width-1, 20)))
 }

@@ -79,6 +79,7 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `c` | Copy PR link to clipboard |
 | `v` | Full PR view: conversation (description, checks, reviews, comments) and a syntax-highlighted diff with review threads inline |
 | `d` | Review PR diff with [hunk](https://github.com/modem-dev/hunk), with GitHub review comments inline (split by default; press `1`/`2`/`0` inside hunk to flip layout, `a` to toggle comments) |
+| `m` | Merge PR: pick squash / merge commit / rebase, delete the branch, or enable auto-merge |
 | `A` | Approve PR (with `y`/`n` confirm) |
 | `D` | Request changes — opens `$EDITOR` for body |
 | `M` | Comment on PR — opens `$EDITOR` for body |
@@ -104,6 +105,7 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `w` | Toggle line wrapping |
 | `x` | Collapse / expand the current file |
 | `r` | Request or remove reviewers (type to filter, `space` toggles, `enter` saves) |
+| `m` | Merge (`↑`/`↓` method, `b` delete branch, `a` auto-merge, `!` admin bypass when allowed) |
 | `R` | Reload |
 | `esc` | Back to the list |
 

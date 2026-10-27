@@ -845,6 +845,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reviewersSavedMsg:
 		return m, m.handleReviewersSaved(msg)
 
+	case mergeDoneMsg:
+		return m, m.handleMergeDone(msg)
+
 	case startRefreshMsg:
 		return m, tea.Batch(m.startRefresh(), m.schedulePrefetch())
 
@@ -926,7 +929,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerTickMsg:
 		if m.loading || m.refreshing || m.loadingDiff || m.actionPending || (m.detail != nil && (m.detail.loading || m.detail.diffLoading ||
-			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)))) {
+			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)) ||
+			(m.detail.merge != nil && m.detail.merge.saving))) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
 			return m, spinnerTick()
 		}
@@ -1407,6 +1411,14 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "m":
+		if pr, ok := m.currentPR(); ok && m.detail == nil {
+			cmd := m.openDetail(pr)
+			m.detail.merge = newMergeDialog(m.detail.detail)
+			return m, cmd
+		}
+		return m, nil
+
 	case "d":
 		if m.loadingDiff {
 			return m, nil
@@ -1665,6 +1677,7 @@ func (m model) helpView() string {
 		{"Actions", [][2]string{
 			{"Enter", "Checkout PR"},
 			{"v", "Full PR view (conversation + highlighted diff)"},
+			{"m", "Merge PR"},
 			{"d", "Review diff with inline comments (hunk: 1=split · 2=stack · 0=auto)"},
 			{"A", "Approve"},
 			{"D", "Request changes"},

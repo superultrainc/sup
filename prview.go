@@ -129,7 +129,20 @@ type prDetail struct {
 	ChangedFiles   int       `json:"changedFiles"`
 	ReviewDecision string    `json:"reviewDecision"`
 	Mergeable      string    `json:"mergeable"`
-	Labels         struct {
+	HeadRefOid     string    `json:"headRefOid"`
+	// mergeStateStatus is GitHub's merge-button state: CLEAN, BLOCKED, BEHIND, DIRTY, UNSTABLE, HAS_HOOKS, DRAFT, UNKNOWN.
+	MergeStateStatus      string `json:"mergeStateStatus"`
+	ViewerCanMergeAsAdmin bool   `json:"viewerCanMergeAsAdmin"`
+	AutoMergeRequest      *struct {
+		MergeMethod string `json:"mergeMethod"`
+	} `json:"autoMergeRequest"`
+	Repository struct {
+		MergeCommitAllowed       bool   `json:"mergeCommitAllowed"`
+		SquashMergeAllowed       bool   `json:"squashMergeAllowed"`
+		RebaseMergeAllowed       bool   `json:"rebaseMergeAllowed"`
+		ViewerDefaultMergeMethod string `json:"viewerDefaultMergeMethod"`
+	} `json:"repository"`
+	Labels struct {
 		Nodes []prLabel `json:"nodes"`
 	} `json:"labels"`
 	Assignees struct {
@@ -180,6 +193,9 @@ const prDetailQuery = `{
 			title body url state isDraft createdAt
 			author { login }
 			baseRefName headRefName additions deletions changedFiles reviewDecision mergeable
+			headRefOid mergeStateStatus viewerCanMergeAsAdmin
+			autoMergeRequest { mergeMethod }
+			repository { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerDefaultMergeMethod }
 			labels(first: 20) { nodes { name color } }
 			assignees(first: 10) { nodes { login } }
 			allCommits: commits(first: 100) { nodes { commit {
@@ -308,6 +324,7 @@ type prDetailView struct {
 	collapsed   map[string]bool // per-path override of the default collapse rule
 	width       int
 	picker      *reviewerPicker // non-nil while the reviewer picker is open
+	merge       *mergeDialog    // non-nil while the merge dialog is open
 }
 
 func newDetailView(pr PR) *prDetailView {
@@ -439,6 +456,9 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.detail.picker != nil {
 		return m.handlePickerInput(msg)
 	}
+	if m.detail.merge != nil {
+		return m.handleMergeInput(msg)
+	}
 	if m.confirmAction != "" {
 		return m.handleNormalInput(msg)
 	}
@@ -503,6 +523,10 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.collapsed[f.path()] = !r.isCollapsed(f)
 			v.rebuildFilesKeepingPlace()
 		}
+	case "m":
+		v.merge = newMergeDialog(v.detail)
+		m.actionStatus = ""
+		return m, nil
 	case "r":
 		v.picker = newReviewerPicker(v.pr, v.detail)
 		m.actionStatus = ""
@@ -538,6 +562,9 @@ func mockPRDetail(pr PR) *prDetail {
 		Mergeable:      "MERGEABLE",
 	}
 	d.Commits.TotalCount = 3
+	d.HeadRefOid, d.MergeStateStatus = "c7d8e9f", "CLEAN"
+	d.Repository.SquashMergeAllowed, d.Repository.MergeCommitAllowed = true, true
+	d.Repository.ViewerDefaultMergeMethod = "SQUASH"
 	d.Labels.Nodes = []prLabel{{"enhancement", "a2eeef"}, {"backend", "5319e7"}}
 	d.Assignees.Nodes = []ghActor{{pr.Author.Login}}
 	for i, h := range []string{"Validate Config in NewThing", "Add NewThing tests", "Wrap /things in a 5s timeout"} {

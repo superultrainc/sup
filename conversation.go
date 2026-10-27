@@ -371,6 +371,11 @@ func mergeBox(d *prDetail, width int, th diffTheme) []string {
 			out = append(out, bs.Render("│")+" "+fitWidth("   "+sty(th.muted, "", false, false).Render(r.sub), inner-2)+" "+bs.Render("│"))
 		}
 	}
+	if d.State == "OPEN" {
+		out = append(out, bs.Render("├"+strings.Repeat("─", inner)+"┤"))
+		hint := sty(th.addBar, "", true, false).Render("m") + sty(th.muted, "", false, false).Render(" merge pull request")
+		out = append(out, bs.Render("│")+" "+fitWidth(hint, inner-2)+" "+bs.Render("│"))
+	}
 	return append(out, bs.Render("╰"+strings.Repeat("─", inner)+"╯"))
 }
 

@@ -17,7 +17,6 @@ A terminal UI for browsing and checking out GitHub PRs.
 ## Requirements
 
 - [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`)
-- [hunk](https://github.com/modem-dev/hunk) (optional, for the `d` keybinding): `npm i -g hunkdiff`
 
 ## Install
 
@@ -77,7 +76,9 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `o` | Open PR in browser |
 | `O` | Open all PRs needing review in browser |
 | `c` | Copy PR link to clipboard |
-| `d` | Review PR diff with [hunk](https://github.com/modem-dev/hunk) (split by default; press `1`/`2`/`0` inside hunk to flip layout) |
+| `v` | Full PR view: conversation (description, checks, reviews, comments) and a syntax-highlighted diff with review threads inline |
+| `d` | Open the PR view on its diff (Files changed tab) |
+| `m` | Merge PR: pick squash / merge commit / rebase, delete the branch, or enable auto-merge |
 | `A` | Approve PR (with `y`/`n` confirm) |
 | `D` | Request changes — opens `$EDITOR` for body |
 | `M` | Comment on PR — opens `$EDITOR` for body |
@@ -85,11 +86,44 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `?` | Toggle full help overlay |
 | `q` / `Esc` | Quit |
 
+### PR view
+
+`v` opens a full-screen view of the selected PR, laid out like GitHub's PR page. `tab` / `shift+tab` or `1`–`4` switch tabs:
+
+- **Conversation**: the description, then a timeline of comments, reviews, pushed commits, and review threads (resolved ones folded), ending with a merge box (review, checks, conflicts). Reviewers, assignees, and labels sit in a sidebar on wide terminals.
+- **Files changed**: syntax-highlighted diff with word-level change highlights and review threads inline under their lines, plus a file tree on wide terminals. Lockfiles and very large diffs start collapsed.
+- **Commits**: commits grouped by day.
+- **Checks**: every check on the latest commit, failures first.
+
+| Key | Action |
+|-----|--------|
+| `j` / `k`, `ctrl+d` / `ctrl+u`, `space` | Scroll |
+| `/` | Search the current tab (`enter` keeps it, `esc` cancels or clears) |
+| `[` / `]` | Previous / next item (Conversation, Commits) or file (Files) |
+| `n` / `N` | Next / previous search match; without a search, next / previous review thread (Files) |
+| `s` | Cycle layout: auto → split → unified |
+| `w` | Toggle line wrapping |
+| `x` | Collapse / expand the current file |
+| `r` | Request or remove reviewers (type to filter, `space` toggles, `enter` saves) |
+| `m` | Merge (`↑`/`↓` method, `b` delete branch, `a` auto-merge, `!` admin bypass when allowed) |
+| `d` | Jump to Files changed |
+| `R` | Reload |
+| `esc` | Back to the list |
+
+`A`, `D`, `M`, `o`, and `c` work from here too.
+
+The mouse works too: click a tab to switch, click a file in the tree to jump to it, and scroll with the wheel. In the list, click a PR to select it and click it again to open it. Hold Option (or Shift, depending on your terminal) to select text.
+
+Images in descriptions and comments render inline. Terminals with the kitty graphics protocol and Unicode placeholders (kitty, Ghostty, Rex) get full-resolution images; others get a truecolor half-block preview. Detection is automatic; set `SUP_IMAGES=kitty` or `SUP_IMAGES=blocks` to force one.
+
+PRs open instantly once cached: sup prefetches the PR under the cursor, keeps a disk cache in `~/.cache/sup/prs`, and refreshes in the background. The diff is only refetched when the PR's head commit changes.
+
 ## Configuration (optional)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SUP_ORG` | Override org detection (comma-separated) | auto-detected |
 | `SUP_DEV_DIR` | Override repo location search | auto-detected |
+| `SUP_IMAGES` | Image rendering: `kitty` or `blocks` | auto-detected |
 
 Repos are automatically found in: `~/Development`, `~/dev`, `~/projects`, `~/code`, `~/src`, `~/repos`, `~/github`, `~/git`, `~`

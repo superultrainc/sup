@@ -208,3 +208,20 @@ func TestSyncRepoListClearsWhenPinnedRepoDisappears(t *testing.T) {
 		t.Fatalf("expected filter cleared, got index %d", m.repoFilterIndex)
 	}
 }
+
+// A single-PR refresh must not drop a repo filter and flash the full list.
+func TestPRRefreshKeepsRepoFilter(t *testing.T) {
+	m := sampleModel()
+	demoMode = true // skip writing the PR cache
+	defer func() { demoMode = false }()
+	m.cycleRepoFilter(1) // "sup"
+	if got := numbers(m.filtered); len(got) != 1 || got[0] != 3 {
+		t.Fatalf("setup: want [3], got %v", got)
+	}
+	updated := m.prs[2]
+	updated.Title = "changed"
+	next, _ := m.Update(prRefreshedMsg{pr: updated})
+	if got := numbers(next.(model).filtered); len(got) != 1 || got[0] != 3 {
+		t.Fatalf("after refresh: want [3], got %v", got)
+	}
+}

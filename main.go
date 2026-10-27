@@ -195,6 +195,7 @@ type PR struct {
 	Number      int    `json:"number"`
 	Title       string `json:"title"`
 	HeadRefName string `json:"headRefName"`
+	HeadRefOid  string `json:"headRefOid"`
 	IsDraft     bool   `json:"isDraft"`
 	Additions   int    `json:"additions"`
 	Deletions   int    `json:"deletions"`
@@ -241,9 +242,7 @@ type model struct {
 	width             int
 	height            int
 	loading           bool
-	refreshing        bool // true when fetching new data while showing cached data
-	loadingDiff       bool // true while fetching diff before launching hunk
-	diffError         string
+	refreshing        bool   // true when fetching new data while showing cached data
 	confirmAction     string // non-empty while awaiting y/n confirmation (e.g. "approve")
 	confirmPR         *PR
 	actionPending     bool            // true while a review submission is in flight
@@ -258,6 +257,9 @@ type model struct {
 	authorFilter      string          // author filter (e.g., "!username"), empty means no author filter
 	repos             []string        // repo names present in m.prs, sorted; rebuilt on every refresh
 	repoFilterIndex   int             // current index into repos (-1 means no repo filter)
+	detail            *prDetailView   // non-nil while the full PR view is open
+	cache             map[string]*prCacheEntry
+	hoverSeq          int // invalidates pending prefetch ticks when the cursor moves
 }
 
 type prPageLoadedMsg struct {
@@ -271,16 +273,6 @@ type prPageLoadedMsg struct {
 
 func prKey(pr PR) string {
 	return fmt.Sprintf("%s/%s#%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
-}
-
-type diffFetchedMsg struct {
-	patch []byte
-	mode  string // "split" or "stack" — passed through to hunk via --mode
-	err   error
-}
-
-type hunkDoneMsg struct {
-	err error
 }
 
 type editorDoneMsg struct {
@@ -434,6 +426,7 @@ func initialModel() model {
 				authorFilter:      "",
 				repos:             buildRepoList(cached),
 				repoFilterIndex:   -1,
+				cache:             map[string]*prCacheEntry{},
 			}
 		}
 	}
@@ -447,6 +440,7 @@ func initialModel() model {
 		authorFilter:      "",
 		repos:             []string{},
 		repoFilterIndex:   -1,
+		cache:             map[string]*prCacheEntry{},
 	}
 }
 
@@ -577,6 +571,7 @@ func fetchShardPage(shardIdx int, after string, refreshID int) tea.Cmd {
 						number
 						title
 						headRefName
+						headRefOid
 						isDraft
 						additions
 						deletions
@@ -650,24 +645,6 @@ func (m *model) startRefresh() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func fetchDiffCmd(pr PR, mode string) tea.Cmd {
-	return func() tea.Msg {
-		repoSlug := fmt.Sprintf("%s/%s", pr.Repository.Owner.Login, pr.Repository.Name)
-		cmd := exec.Command("gh", "pr", "diff", fmt.Sprintf("%d", pr.Number), "--repo", repoSlug)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			msg := strings.TrimSpace(stderr.String())
-			if msg == "" {
-				msg = err.Error()
-			}
-			return diffFetchedMsg{mode: mode, err: fmt.Errorf("%s", msg)}
-		}
-		return diffFetchedMsg{patch: out, mode: mode}
-	}
-}
-
 func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 	return func() tea.Msg {
 		repoSlug := fmt.Sprintf("%s/%s", pr.Repository.Owner.Login, pr.Repository.Name)
@@ -702,6 +679,7 @@ func fetchSinglePRCmd(pr PR) tea.Cmd {
 					number
 					title
 					headRefName
+					headRefOid
 					isDraft
 					additions
 					deletions
@@ -784,14 +762,66 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if f, ok := msg.(kittyFlushedMsg); ok {
+		handleKittyFlushed(f)
+		return m, scheduleKittyFlush()
+	}
+	next, cmd := m.update(msg)
+	// Any rebuild may have queued image transmissions for the next frame.
+	return next, tea.Batch(cmd, scheduleKittyFlush())
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.detail != nil {
+			m.detail.rebuild(m.width)
+			m.detail.clampScroll(m.height)
+		}
 		return m, nil
 
+	case prPatchFetchedMsg:
+		m.handlePatchFetched(msg)
+		return m, nil
+
+	case prDetailFetchedMsg:
+		return m, m.handleDetailFetched(msg)
+
+	case diskCacheLoadedMsg:
+		return m, m.handleDiskCacheLoaded(msg)
+
+	case imagesLoadedMsg:
+		handleImagesLoaded(msg)
+		if m.detail != nil {
+			m.detail.rebuild(m.width)
+			m.detail.clampScroll(m.height)
+		}
+		return m, nil
+
+	case hoverMsg:
+		return m, m.handleHover(msg)
+
+	case reviewerCandidatesMsg:
+		if v := m.detail; v != nil && v.picker != nil && prKey(v.pr) == msg.key {
+			if msg.err != nil {
+				v.picker.loading, v.picker.err = false, msg.err
+			} else {
+				latest, _ := latestReviewStates(v.detail)
+				v.picker.setCandidates(msg.cands, v.pr.Author.Login, latest)
+			}
+		}
+		return m, nil
+
+	case reviewersSavedMsg:
+		return m, m.handleReviewersSaved(msg)
+
+	case mergeDoneMsg:
+		return m, m.handleMergeDone(msg)
+
 	case startRefreshMsg:
-		return m, m.startRefresh()
+		return m, tea.Batch(m.startRefresh(), m.schedulePrefetch())
 
 	case prPageLoadedMsg:
 		// Stale message from a prior refresh — ignore.
@@ -808,11 +838,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = false
 			}
 			return m, nil
-		}
-
-		var selectedPRNumber int
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			selectedPRNumber = m.filtered[m.cursor].Number
 		}
 
 		for _, np := range msg.prs {
@@ -857,23 +882,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		sortPRsByOldestFirst(m.prs)
 		m.syncRepoList()
-
-		m.applyFilter()
-
-		if selectedPRNumber > 0 {
-			for i, pr := range m.filtered {
-				if pr.Number == selectedPRNumber {
-					m.cursor = i
-					break
-				}
-			}
-		}
-		if m.cursor >= len(m.filtered) {
-			m.cursor = len(m.filtered) - 1
-		}
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
+		m.applyFilterKeepingCursor()
 
 		m.loading = false
 		m.visibleCount = len(m.filtered)
@@ -891,7 +900,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		if m.loading || m.refreshing || m.loadingDiff || m.actionPending {
+		if m.loading || m.refreshing || m.actionPending || (m.detail != nil && (m.detail.loading || m.detail.diffLoading ||
+			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)) ||
+			(m.detail.merge != nil && m.detail.merge.saving))) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
 			return m, spinnerTick()
 		}
@@ -926,7 +937,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.actionStatus = fmt.Sprintf("✓ %s PR #%d", verb, msg.pr.Number)
 		// Refresh just this PR so its badge reflects the new review state.
-		return m, fetchSinglePRCmd(msg.pr)
+		cmds := []tea.Cmd{fetchSinglePRCmd(msg.pr)}
+		if m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr) {
+			m.detail.loading = true
+			cmds = append(cmds, fetchPRDetailCmd(msg.pr), spinnerTick())
+		}
+		return m, tea.Batch(cmds...)
 
 	case metaRefreshedMsg:
 		if len(msg.orgs) > 0 {
@@ -950,63 +966,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		// Preserve cursor across the filter rebuild.
-		var selectedPRNumber int
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			selectedPRNumber = m.filtered[m.cursor].Number
+		if m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr) {
+			m.detail.pr = msg.pr
 		}
-		if m.filterText != "" {
-			m.applyFilter()
-		} else {
-			m.filtered = m.prs
-		}
-		if selectedPRNumber > 0 {
-			for i, pr := range m.filtered {
-				if pr.Number == selectedPRNumber {
-					m.cursor = i
-					break
-				}
-			}
-		}
-		if m.cursor >= len(m.filtered) {
-			m.cursor = len(m.filtered) - 1
-		}
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
+		// Every active filter (repo, status, author) must survive the rebuild, not just typed text.
+		m.applyFilterKeepingCursor()
 		if !demoMode {
 			savePRsToCache(m.prs)
 		}
 		return m, nil
 
-	case diffFetchedMsg:
-		m.loadingDiff = false
-		if msg.err != nil {
-			m.diffError = msg.err.Error()
-			return m, nil
-		}
-		args := []string{"patch"}
-		if msg.mode != "" {
-			args = append(args, "--mode", msg.mode)
-		}
-		args = append(args, "-")
-		hunk := exec.Command("hunk", args...)
-		hunk.Stdin = bytes.NewReader(msg.patch)
-		return m, tea.ExecProcess(hunk, func(err error) tea.Msg {
-			return hunkDoneMsg{err: err}
-		})
-
-	case hunkDoneMsg:
-		if msg.err != nil {
-			m.diffError = fmt.Sprintf("hunk error: %v", msg.err)
-		}
-		return m, nil
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
 		// ctrl+c always quits, even from the help overlay.
 		if msg.String() == "ctrl+c" {
 			m.quitting = true
 			return m, tea.Quit
+		}
+		if m.detail != nil {
+			return m.handleDetailInput(msg)
 		}
 		// In help overlay, only ?/esc/q dismiss; everything else is ignored.
 		if m.helpMode {
@@ -1171,6 +1151,21 @@ func (m *model) applyFilter() {
 	m.cursor = 0
 }
 
+// applyFilterKeepingCursor re-filters after data changes without moving the selection.
+func (m *model) applyFilterKeepingCursor() {
+	var selected string
+	if m.cursor < len(m.filtered) {
+		selected = prKey(m.filtered[m.cursor])
+	}
+	m.applyFilter()
+	for i, pr := range m.filtered {
+		if prKey(pr) == selected {
+			m.cursor = i
+			break
+		}
+	}
+}
+
 func indexOfStatus(name string) int {
 	for i, s := range statusFilters {
 		if name == s {
@@ -1239,6 +1234,17 @@ func (m *model) cycleRepoFilter(delta int) {
 	m.applyFilter()
 }
 
+// currentPR is the PR that actions target: the open detail view's PR, else the cursor row.
+func (m model) currentPR() (PR, bool) {
+	if m.detail != nil {
+		return m.detail.pr, true
+	}
+	if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+		return m.filtered[m.cursor], true
+	}
+	return PR{}, false
+}
+
 func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Confirmation prompts intercept input before any other handling.
 	if m.confirmAction != "" {
@@ -1272,7 +1278,6 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Any key dismisses transient feedback from a previous action.
-	m.diffError = ""
 	m.actionStatus = ""
 
 	switch msg.String() {
@@ -1280,23 +1285,23 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
-		return m, nil
+		return m, m.schedulePrefetch()
 
 	case "down", "j":
 		if m.cursor < len(m.filtered)-1 {
 			m.cursor++
 		}
-		return m, nil
+		return m, m.schedulePrefetch()
 
 	case "g":
 		m.cursor = 0
-		return m, nil
+		return m, m.schedulePrefetch()
 
 	case "G":
 		if len(m.filtered) > 0 {
 			m.cursor = len(m.filtered) - 1
 		}
-		return m, nil
+		return m, m.schedulePrefetch()
 
 	case "a":
 		if currentUser != "" {
@@ -1345,38 +1350,45 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "d":
-		if m.loadingDiff {
-			return m, nil
+	case "v":
+		if pr, ok := m.currentPR(); ok {
+			return m, m.openDetail(pr)
 		}
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			if _, err := exec.LookPath("hunk"); err != nil {
-				m.diffError = "hunk not installed — npm i -g hunkdiff"
-				return m, nil
-			}
-			m.diffError = ""
-			m.loadingDiff = true
-			return m, tea.Batch(fetchDiffCmd(m.filtered[m.cursor], "split"), spinnerTick())
+		return m, nil
+
+	case "m":
+		if pr, ok := m.currentPR(); ok && m.detail == nil {
+			cmd := m.openDetail(pr)
+			m.detail.merge = newMergeDialog(m.detail.detail)
+			return m, cmd
+		}
+		return m, nil
+
+	case "d":
+		// Opens the PR view straight on its diff.
+		if pr, ok := m.currentPR(); ok && m.detail == nil {
+			cmd := m.openDetail(pr)
+			m.detail.tab = tabFiles
+			return m, cmd
 		}
 		return m, nil
 
 	case "A":
-		if m.actionPending || m.loadingDiff {
+		if m.actionPending {
 			return m, nil
 		}
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			pr := m.filtered[m.cursor]
+		if pr, ok := m.currentPR(); ok {
 			m.confirmAction = "approve"
 			m.confirmPR = &pr
 		}
 		return m, nil
 
 	case "D":
-		if m.actionPending || m.loadingDiff {
+		if m.actionPending {
 			return m, nil
 		}
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			cmd, err := startEditorCmd("request-changes", m.filtered[m.cursor])
+		if pr, ok := m.currentPR(); ok {
+			cmd, err := startEditorCmd("request-changes", pr)
 			if err != nil {
 				m.actionStatus = "Error: " + err.Error()
 				return m, nil
@@ -1386,11 +1398,11 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "M":
-		if m.actionPending || m.loadingDiff {
+		if m.actionPending {
 			return m, nil
 		}
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			cmd, err := startEditorCmd("comment", m.filtered[m.cursor])
+		if pr, ok := m.currentPR(); ok {
+			cmd, err := startEditorCmd("comment", pr)
 			if err != nil {
 				m.actionStatus = "Error: " + err.Error()
 				return m, nil
@@ -1400,16 +1412,14 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "o":
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			pr := m.filtered[m.cursor]
+		if pr, ok := m.currentPR(); ok {
 			url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
 			exec.Command("open", "-g", url).Start()
 		}
 		return m, nil
 
 	case "c":
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			pr := m.filtered[m.cursor]
+		if pr, ok := m.currentPR(); ok {
 			url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
 			cmd := exec.Command("pbcopy")
 			cmd.Stdin = strings.NewReader(url)
@@ -1601,7 +1611,9 @@ func (m model) helpView() string {
 		}},
 		{"Actions", [][2]string{
 			{"Enter", "Checkout PR"},
-			{"d", "Review diff (hunk: 1=split · 2=stack · 0=auto)"},
+			{"v", "Full PR view (conversation + highlighted diff)"},
+			{"m", "Merge PR"},
+			{"d", "Open the PR's diff"},
 			{"A", "Approve"},
 			{"D", "Request changes"},
 			{"M", "Comment"},
@@ -1649,6 +1661,15 @@ func (m model) activeFilterLabels() []string {
 }
 
 func (m model) View() string {
+	// Pending kitty image transmissions ride along at the start of the frame;
+	// they're zero-width, and drop out once flushed.
+	return strings.Join(kittyPending, "") + m.view()
+}
+
+func (m model) view() string {
+	if m.detail != nil {
+		return m.detailView()
+	}
 	if m.helpMode {
 		return m.helpView()
 	}
@@ -1701,8 +1722,6 @@ func (m model) View() string {
 			style = changesRequestedStyle
 		}
 		s.WriteString(style.Render("  " + m.actionStatus))
-	case m.diffError != "":
-		s.WriteString(changesRequestedStyle.Render("  " + m.diffError))
 	case filterLine == "  ":
 		s.WriteString(filterLine)
 	default:
@@ -1816,7 +1835,8 @@ func (m model) View() string {
 			s.WriteString("\n")
 		}
 
-		if m.filterText != "" {
+		// Any filter (repo, status, author, text) narrows the list, so count what's shown.
+		if len(m.filtered) != len(m.prs) {
 			s.WriteString(fmt.Sprintf("\n  %d of %d PRs", len(m.filtered), len(m.prs)))
 		} else {
 			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))
@@ -1826,14 +1846,11 @@ func (m model) View() string {
 		} else if m.refreshing {
 			spinner := spinnerFrames[m.spinnerFrame]
 			s.WriteString(loadingStyle.Render("  " + spinner + " Refreshing"))
-		} else if m.loadingDiff {
-			spinner := spinnerFrames[m.spinnerFrame]
-			s.WriteString(loadingStyle.Render("  " + spinner + " Loading diff..."))
 		}
 	}
 
 	s.WriteString("\n")
-	s.WriteString(helpStyle.Render(truncateToWidth("  ?: help · /: filter · enter: checkout · q: quit", rowWidth)))
+	s.WriteString(helpStyle.Render(truncateToWidth("  ?: help · /: filter · v: view · enter: checkout · q: quit", rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()
@@ -1966,8 +1983,16 @@ func main() {
 		saveCachedMeta(metaCache{Orgs: orgs, CurrentUser: currentUser})
 	}
 
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	if !lipgloss.HasDarkBackground() {
+		glamourStyle = "light"
+	}
+
+	go pruneDiskCache()
+	detectImageMode()
+
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
+	kittyFreeAll()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

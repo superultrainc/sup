@@ -38,14 +38,12 @@ func warmCmd(pr PR, snap warmSnapshot) tea.Cmd {
 	return func() tea.Msg {
 		out := warmDoneMsg{pr: pr}
 		if !snap.inMemory {
-			if dm, ok := readDiskCache(pr); ok {
+			if dm, ok := readDiskCache(pr, false); ok {
 				out.disk = &dm
 				if dm.detail != nil {
 					snap.detailUpdated = dm.detail.UpdatedAt
 				}
-				if dm.files != nil {
-					snap.head = dm.head
-				}
+				snap.head = dm.head
 			}
 		}
 		needDetail, needPatch := snap.needs(pr)
@@ -62,7 +60,7 @@ func warmCmd(pr PR, snap warmSnapshot) tea.Cmd {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				msg := fetchPatchCmd(pr)().(prPatchFetchedMsg)
+				msg := fetchPatchCmd(pr, false)().(prPatchFetchedMsg)
 				out.patch = &msg
 			}()
 		}
@@ -115,39 +113,47 @@ func (m *model) pumpWarm() tea.Cmd {
 			if e.detail != nil {
 				snap.detailUpdated = e.detail.UpdatedAt
 			}
-			if e.files != nil {
+			if e.hasPatch {
 				snap.head = e.head
 			}
 			if d, p := snap.needs(pr); !d && !p {
 				continue
 			}
 		}
+		// Mark both in flight so hover and open wait for this instead of refetching.
+		e = m.cacheEntry(prKey(pr))
+		e.detailPending, e.patchPending = true, true
 		m.warmInFlight++
 		cmds = append(cmds, warmCmd(pr, snap))
 	}
 	return tea.Batch(cmds...)
 }
 
-// handleWarmDone merges results through the regular cache handlers. Image
-// downloads are kept only for the PR on screen; others wait for hover or open.
+// handleWarmDone merges results through the regular cache handlers. Images
+// are only queued for the PR on screen; others load on hover or open.
 func (m *model) handleWarmDone(msg warmDoneMsg) tea.Cmd {
 	m.warmInFlight--
 	key := prKey(msg.pr)
 	open := m.detail != nil && prKey(m.detail.pr) == key
+	e := m.cacheEntry(key)
+	e.detailPending, e.patchPending = false, false
 	var cmds []tea.Cmd
-	keep := func(c tea.Cmd) {
-		if open {
-			cmds = append(cmds, c)
-		}
-	}
 	if msg.disk != nil {
-		keep(m.handleDiskCacheLoaded(*msg.disk))
+		cmds = append(cmds, m.handleDiskCacheLoaded(*msg.disk, open))
 	}
 	if msg.detail != nil {
-		keep(m.handleDetailFetched(*msg.detail))
+		cmds = append(cmds, m.handleDetailFetched(*msg.detail, open))
 	}
 	if msg.patch != nil {
-		m.handlePatchFetched(*msg.patch)
+		cmds = append(cmds, m.handlePatchFetched(*msg.patch))
+	}
+	if open {
+		// The view may have opened mid-warm and be waiting on these.
+		v := m.detail
+		v.loading = v.detail == nil
+		if v.diff == nil {
+			cmds = append(cmds, m.ensureParsed(key, e))
+		}
 	}
 	cmds = append(cmds, m.pumpWarm())
 	return tea.Batch(cmds...)

@@ -1,12 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,25 +17,44 @@ import (
 type prCacheEntry struct {
 	detail        *prDetail
 	detailJSON    []byte
+	detailFP      string // detailJSON minus bodyHTML, for change detection
 	detailAt      time.Time
 	detailPending bool
 
-	files        []*diffFile
-	patch        string
+	patch        string // raw unified diff
+	hasPatch     bool
 	head         string // headRefOid the patch was fetched at
 	patchPending bool
+	// files is the parsed, highlighted patch. Warming keeps only the raw patch;
+	// it's parsed when a PR is hovered or opened (see ensureParsed).
+	files   []*diffFile
+	parsing bool
 }
 
 const (
-	hoverDelay       = 150 * time.Millisecond
-	detailFreshFor   = 30 * time.Second // skip revalidating right after a prefetch
-	diskCacheMaxAge  = 14 * 24 * time.Hour
-	prCacheDirName   = "prs"
-	prCacheExtension = ".json"
+	hoverDelay     = 150 * time.Millisecond
+	detailFreshFor = 30 * time.Second // skip revalidating right after a prefetch
+	// detailTrustUnchanged bounds how long a detail whose updatedAt still matches
+	// the list counts as fresh; checks and mergeability change without bumping it.
+	detailTrustUnchanged = 5 * time.Minute
+	diskCacheMaxAge      = 14 * 24 * time.Hour
+	prCacheDirName       = "prs"
+	prCacheExtension     = ".json"
 )
 
+func (e *prCacheEntry) detailFresh(pr PR) bool {
+	if e.detail == nil {
+		return false
+	}
+	age := time.Since(e.detailAt)
+	if age < detailFreshFor {
+		return true
+	}
+	return !pr.UpdatedAt.IsZero() && e.detail.UpdatedAt.Equal(pr.UpdatedAt) && age < detailTrustUnchanged
+}
+
 func (e *prCacheEntry) patchFresh(pr PR) bool {
-	return e.files != nil && pr.HeadRefOid != "" && e.head == pr.HeadRefOid
+	return e.hasPatch && pr.HeadRefOid != "" && e.head == pr.HeadRefOid
 }
 
 func (m *model) cacheEntry(key string) *prCacheEntry {
@@ -50,15 +69,51 @@ func (m *model) cacheEntry(key string) *prCacheEntry {
 // fetchMissing starts whichever fetches the cached entry needs, skipping ones in flight.
 func (m *model) fetchMissing(pr PR, e *prCacheEntry) []tea.Cmd {
 	var cmds []tea.Cmd
-	if !e.detailPending && (e.detail == nil || time.Since(e.detailAt) > detailFreshFor) {
+	if !e.detailPending && !e.detailFresh(pr) {
 		e.detailPending = true
 		cmds = append(cmds, fetchPRDetailCmd(pr))
 	}
 	if !e.patchPending && !e.patchFresh(pr) {
 		e.patchPending = true
-		cmds = append(cmds, fetchPatchCmd(pr))
+		cmds = append(cmds, fetchPatchCmd(pr, true))
 	}
 	return cmds
+}
+
+type patchParsedMsg struct {
+	key   string
+	patch string
+	files []*diffFile
+}
+
+// ensureParsed parses and highlights a raw cached patch off the UI goroutine.
+func (m *model) ensureParsed(key string, e *prCacheEntry) tea.Cmd {
+	if e.files != nil || !e.hasPatch || e.parsing {
+		return nil
+	}
+	e.parsing = true
+	patch := e.patch
+	return func() tea.Msg {
+		files := parseUnifiedDiff(patch)
+		highlightFiles(files)
+		return patchParsedMsg{key: key, patch: patch, files: files}
+	}
+}
+
+func (m *model) handlePatchParsed(msg patchParsedMsg) tea.Cmd {
+	e := m.cacheEntry(msg.key)
+	e.parsing = false
+	if msg.patch != e.patch {
+		// A newer patch arrived while parsing; parse that one instead.
+		return m.ensureParsed(msg.key, e)
+	}
+	e.files = msg.files
+	if v := m.detail; v != nil && prKey(v.pr) == msg.key {
+		v.diff = e.files
+		v.diffLoading = e.patchPending
+		v.invalidateFiles()
+	}
+	return nil
 }
 
 // openDetail shows cached data immediately and revalidates what's stale.
@@ -69,13 +124,13 @@ func (m *model) openDetail(pr PR) tea.Cmd {
 	_, inMemory := m.cache[key]
 	e := m.cacheEntry(key)
 	v.detail, v.diff = e.detail, e.files
-	v.loading = e.detailPending || e.detail == nil || time.Since(e.detailAt) > detailFreshFor
-	v.diffLoading = e.patchPending || !e.patchFresh(pr)
+	v.loading = e.detailPending || !e.detailFresh(pr)
+	v.diffLoading = e.patchPending || !e.patchFresh(pr) || e.files == nil
 	m.detail = v
 	if v.detail != nil || v.diff != nil {
 		v.rebuild(m.width)
 	}
-	cmds := append(m.fetchMissing(pr, e), spinnerTick(), queueImages(e.detail, false))
+	cmds := append(m.fetchMissing(pr, e), spinnerTick(), m.ensureParsed(key, e), queueImages(e.detail, false))
 	if !inMemory {
 		cmds = append(cmds, loadDiskCacheCmd(pr))
 	}
@@ -98,13 +153,15 @@ func (m *model) schedulePrefetch() tea.Cmd {
 	return tea.Tick(hoverDelay, func(time.Time) tea.Msg { return hoverMsg{seq: seq, pr: pr} })
 }
 
+// handleHover fetches what's stale and parses the diff, since an open is likely next.
 func (m *model) handleHover(msg hoverMsg) tea.Cmd {
 	if msg.seq != m.hoverSeq || m.detail != nil {
 		return nil
 	}
 	key := prKey(msg.pr)
 	_, inMemory := m.cache[key]
-	cmds := m.fetchMissing(msg.pr, m.cacheEntry(key))
+	e := m.cacheEntry(key)
+	cmds := append(m.fetchMissing(msg.pr, e), m.ensureParsed(key, e))
 	if !inMemory {
 		cmds = append(cmds, loadDiskCacheCmd(msg.pr))
 	}
@@ -114,20 +171,27 @@ func (m *model) handleHover(msg hoverMsg) tea.Cmd {
 // bodyHTMLRe matches bodyHTML JSON fields, whose signed image URLs change on every fetch.
 var bodyHTMLRe = regexp.MustCompile(`"bodyHTML":"(?:[^"\\]|\\.)*"`)
 
-func (m *model) handleDetailFetched(msg prDetailFetchedMsg) tea.Cmd {
+func detailFingerprint(raw []byte) string {
+	return string(bodyHTMLRe.ReplaceAll(raw, nil))
+}
+
+// handleDetailFetched stores a fetched detail. wantImages is false for
+// background warming, whose image downloads would otherwise be queued and dropped.
+func (m *model) handleDetailFetched(msg prDetailFetchedMsg, wantImages bool) tea.Cmd {
 	e := m.cacheEntry(msg.key)
 	e.detailPending = false
 	changed := false
 	var images tea.Cmd
 	if msg.err == nil {
-		raw, _ := json.Marshal(msg.detail)
-		changed = !bytes.Equal(bodyHTMLRe.ReplaceAll(raw, nil), bodyHTMLRe.ReplaceAll(e.detailJSON, nil))
-		e.detail, e.detailJSON, e.detailAt = msg.detail, raw, time.Now()
+		changed = msg.fp != e.detailFP
+		e.detail, e.detailJSON, e.detailFP, e.detailAt = msg.detail, msg.raw, msg.fp, time.Now()
 		if changed {
 			saveDiskCache(msg.key, e)
 		}
-		// Fresh signed URLs: download now, even on a hover prefetch.
-		images = queueImages(msg.detail, true)
+		if wantImages {
+			// Fresh signed URLs: download now, even on a hover prefetch.
+			images = queueImages(msg.detail, true)
+		}
 	}
 	v := m.detail
 	if v == nil || prKey(v.pr) != msg.key {
@@ -142,27 +206,41 @@ func (m *model) handleDetailFetched(msg prDetailFetchedMsg) tea.Cmd {
 	return images
 }
 
-func (m *model) handlePatchFetched(msg prPatchFetchedMsg) {
+func (m *model) handlePatchFetched(msg prPatchFetchedMsg) tea.Cmd {
 	e := m.cacheEntry(msg.key)
 	e.patchPending = false
 	changed := false
 	if msg.err == nil {
-		changed = msg.patch != e.patch
-		e.files, e.patch, e.head = msg.files, msg.patch, msg.head
+		changed = !e.hasPatch || msg.patch != e.patch
+		e.patch, e.head, e.hasPatch = msg.patch, msg.head, true
+		switch {
+		case msg.files != nil:
+			e.files = msg.files
+		case changed:
+			e.files = nil // stale parse; reparsed on demand
+		}
 		if changed {
 			saveDiskCache(msg.key, e)
 		}
 	}
 	v := m.detail
 	if v == nil || prKey(v.pr) != msg.key {
-		return
+		return nil
+	}
+	v.diffErr = msg.err
+	if msg.err != nil {
+		v.diffLoading = false
+		return nil
+	}
+	if e.files == nil {
+		return m.ensureParsed(msg.key, e)
 	}
 	v.diffLoading = false
-	v.diffErr = msg.err
-	if msg.err == nil && (changed || v.diff == nil) {
-		v.diff = msg.files
+	if changed || v.diff == nil {
+		v.diff = e.files
 		v.invalidateFiles()
 	}
+	return nil
 }
 
 type diskCacheEntry struct {
@@ -177,41 +255,68 @@ func diskCachePath(key string) string {
 	return filepath.Join(cacheDir(), prCacheDirName, name+prCacheExtension)
 }
 
+type diskWrite struct {
+	path  string
+	entry diskCacheEntry
+}
+
+var (
+	diskWrites     = make(chan diskWrite, 256)
+	diskWriterOnce sync.Once
+)
+
+// saveDiskCache hands the entry to a single background writer, which keeps
+// writes ordered and off the UI goroutine (patches can be megabytes).
 func saveDiskCache(key string, e *prCacheEntry) {
 	if demoMode {
 		return
 	}
-	data, err := json.Marshal(diskCacheEntry{Detail: e.detailJSON, DetailAt: e.detailAt, Patch: e.patch, Head: e.head})
-	if err != nil {
-		return
+	diskWriterOnce.Do(func() { go diskWriter() })
+	w := diskWrite{diskCachePath(key), diskCacheEntry{Detail: e.detailJSON, DetailAt: e.detailAt, Patch: e.patch, Head: e.head}}
+	select {
+	case diskWrites <- w:
+	default: // writer backed up; the next fetch will save again
 	}
-	path := diskCachePath(key)
-	os.MkdirAll(filepath.Dir(path), 0755)
-	os.WriteFile(path, data, 0644)
+}
+
+func diskWriter() {
+	for w := range diskWrites {
+		data, err := json.Marshal(w.entry)
+		if err != nil {
+			continue
+		}
+		os.MkdirAll(filepath.Dir(w.path), 0755)
+		tmp := w.path + ".tmp"
+		if os.WriteFile(tmp, data, 0644) == nil {
+			os.Rename(tmp, w.path)
+		}
+	}
 }
 
 type diskCacheLoadedMsg struct {
 	key      string
 	detail   *prDetail
 	raw      []byte
+	fp       string
 	detailAt time.Time
-	files    []*diffFile
+	files    []*diffFile // nil unless the patch was parsed
 	patch    string
 	head     string
 }
 
-// loadDiskCacheCmd parses and highlights a cached PR off the UI goroutine.
+// loadDiskCacheCmd reads a cached PR for display, parsing its patch.
 func loadDiskCacheCmd(pr PR) tea.Cmd {
 	return func() tea.Msg {
-		if msg, ok := readDiskCache(pr); ok {
+		if msg, ok := readDiskCache(pr, true); ok {
 			return msg
 		}
 		return nil
 	}
 }
 
-// readDiskCache loads and parses a cached PR; call it off the UI goroutine.
-func readDiskCache(pr PR) (diskCacheLoadedMsg, bool) {
+// readDiskCache loads a cached PR off the UI goroutine. Parsing and
+// highlighting the patch is the costly part, so warming skips it.
+func readDiskCache(pr PR, parse bool) (diskCacheLoadedMsg, bool) {
 	key := prKey(pr)
 	data, err := os.ReadFile(diskCachePath(key))
 	if err != nil || demoMode {
@@ -221,14 +326,14 @@ func readDiskCache(pr PR) (diskCacheLoadedMsg, bool) {
 	if json.Unmarshal(data, &de) != nil {
 		return diskCacheLoadedMsg{}, false
 	}
-	msg := diskCacheLoadedMsg{key: key, raw: de.Detail, detailAt: de.DetailAt, patch: de.Patch, head: de.Head}
+	msg := diskCacheLoadedMsg{key: key, raw: de.Detail, fp: detailFingerprint(de.Detail), detailAt: de.DetailAt, patch: de.Patch, head: de.Head}
 	if len(de.Detail) > 0 {
 		var d prDetail
 		if json.Unmarshal(de.Detail, &d) == nil {
 			msg.detail = &d
 		}
 	}
-	if de.Patch != "" {
+	if parse && de.Patch != "" {
 		msg.files = parseUnifiedDiff(de.Patch)
 		highlightFiles(msg.files)
 	}
@@ -236,29 +341,37 @@ func readDiskCache(pr PR) (diskCacheLoadedMsg, bool) {
 }
 
 // handleDiskCacheLoaded fills gaps only; network results always win.
-func (m *model) handleDiskCacheLoaded(msg diskCacheLoadedMsg) tea.Cmd {
+func (m *model) handleDiskCacheLoaded(msg diskCacheLoadedMsg, wantImages bool) tea.Cmd {
 	e := m.cacheEntry(msg.key)
 	if e.detail == nil && msg.detail != nil {
-		e.detail, e.detailJSON, e.detailAt = msg.detail, msg.raw, msg.detailAt
+		e.detail, e.detailJSON, e.detailFP, e.detailAt = msg.detail, msg.raw, msg.fp, msg.detailAt
 	}
-	if e.files == nil && msg.files != nil {
-		e.files, e.patch, e.head = msg.files, msg.patch, msg.head
+	if !e.hasPatch && msg.head != "" {
+		e.patch, e.head, e.hasPatch, e.files = msg.patch, msg.head, true, msg.files
 	}
-	// Cached signed URLs have likely expired, but the image disk cache may have them.
-	images := queueImages(e.detail, false)
+	var cmds []tea.Cmd
+	if wantImages {
+		// Cached signed URLs have likely expired, but the image disk cache may have them.
+		cmds = append(cmds, queueImages(e.detail, false))
+	}
 	v := m.detail
 	if v == nil || prKey(v.pr) != msg.key {
-		return images
+		return tea.Batch(cmds...)
 	}
 	if v.detail == nil && e.detail != nil {
 		v.applyDetail(e.detail)
 	}
-	if v.diff == nil && e.files != nil {
-		v.diff = e.files
-		v.invalidateFiles()
+	if v.diff == nil {
+		if e.files != nil {
+			v.diff = e.files
+			v.diffLoading = e.patchPending || !e.patchFresh(v.pr)
+			v.invalidateFiles()
+		} else {
+			cmds = append(cmds, m.ensureParsed(msg.key, e))
+		}
 	}
 	v.clampScroll(m.height)
-	return images
+	return tea.Batch(cmds...)
 }
 
 // pruneDiskCache drops cached PRs nobody has opened in a while.

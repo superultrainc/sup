@@ -823,14 +823,16 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case prPatchFetchedMsg:
-		m.handlePatchFetched(msg)
-		return m, nil
+		return m, m.handlePatchFetched(msg)
+
+	case patchParsedMsg:
+		return m, m.handlePatchParsed(msg)
 
 	case prDetailFetchedMsg:
-		return m, m.handleDetailFetched(msg)
+		return m, m.handleDetailFetched(msg, true)
 
 	case diskCacheLoadedMsg:
-		return m, m.handleDiskCacheLoaded(msg)
+		return m, m.handleDiskCacheLoaded(msg, true)
 
 	case imagesLoadedMsg:
 		handleImagesLoaded(msg)
@@ -2038,6 +2040,7 @@ func main() {
 	}
 
 	go pruneDiskCache()
+	go pruneImageCache()
 	detectImageMode()
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())

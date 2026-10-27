@@ -18,7 +18,7 @@ func TestWarmQueueOrderAndSkip(t *testing.T) {
 
 	// PR #4 is already fresh in memory, so it must be skipped.
 	fresh := &prDetail{UpdatedAt: now}
-	m.cache[prKey(m.prs[3])] = &prCacheEntry{detail: fresh, files: []*diffFile{}, head: "head"}
+	m.cache[prKey(m.prs[3])] = &prCacheEntry{detail: fresh, hasPatch: true, head: "head"}
 
 	m.enqueueWarm()
 	// Four PRs, one already fresh: three warm, nothing left queued.

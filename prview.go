@@ -260,13 +260,21 @@ func fetchPRDetail(pr PR) (*prDetail, error) {
 type prDetailFetchedMsg struct {
 	key    string
 	detail *prDetail
+	raw    []byte // detail as JSON, for the disk cache
+	fp     string // raw minus bodyHTML, for change detection
 	err    error
 }
 
+// fetchPRDetailCmd also encodes and fingerprints the detail here, off the UI goroutine.
 func fetchPRDetailCmd(pr PR) tea.Cmd {
 	return func() tea.Msg {
 		d, err := fetchPRDetail(pr)
-		return prDetailFetchedMsg{key: prKey(pr), detail: d, err: err}
+		msg := prDetailFetchedMsg{key: prKey(pr), detail: d, err: err}
+		if err == nil {
+			msg.raw, _ = json.Marshal(d)
+			msg.fp = detailFingerprint(msg.raw)
+		}
+		return msg
 	}
 }
 

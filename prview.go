@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // glamourStyle is resolved before the TUI starts; querying the terminal mid-program garbles input.
@@ -302,6 +303,25 @@ type detailPane struct {
 	lines  []string
 	marks  []int // [ / ] jump targets
 	scroll int
+
+	plain   []string // lowercased, unstyled lines for search
+	plainOf *string  // &lines[0] when plain was built; a rebuild swaps lines and invalidates it
+}
+
+// plainLines returns the pane's searchable text, rebuilt only when lines change.
+func (p *detailPane) plainLines() []string {
+	if len(p.lines) == 0 {
+		return nil
+	}
+	if p.plainOf == &p.lines[0] && len(p.plain) == len(p.lines) {
+		return p.plain
+	}
+	p.plain = make([]string, len(p.lines))
+	for i, l := range p.lines {
+		p.plain[i] = strings.ToLower(ansi.Strip(l))
+	}
+	p.plainOf = &p.lines[0]
+	return p.plain
 }
 
 // Tab order; the diff comes right after the conversation.
@@ -332,7 +352,7 @@ type prDetailView struct {
 	picker      *reviewerPicker // non-nil while the reviewer picker is open
 	merge       *mergeDialog    // non-nil while the merge dialog is open
 	search      *detailSearch   // non-nil while a `/` search is being typed or is active
-	filesDirty  bool            // diff pane needs re-rendering before it's shown
+	dirty       [tabCount]bool  // panes needing a render before they're shown
 }
 
 func newDetailView(pr PR) *prDetailView {
@@ -427,31 +447,27 @@ func (v *prDetailView) applyDetail(d *prDetail) {
 	threadsChanged := v.detail == nil || threadsKey(v.detail) != threadsKey(d)
 	v.detail = d
 	v.width = max(v.width, 40)
-	v.rebuildConv()
-	v.rebuildCommits()
-	v.rebuildChecks()
+	v.invalidate(tabConversation, tabCommits, tabChecks)
 	if threadsChanged {
-		v.invalidateFiles()
+		v.invalidate(tabFiles)
 	}
-	v.refreshSearch()
+	v.ensure()
 }
 
 // rebuildForImages re-renders the panes that can show the newly loaded images.
 func (v *prDetailView) rebuildForImages() {
 	v.width = max(v.width, 40)
-	v.rebuildConv()
+	v.invalidate(tabConversation)
 	if v.detail != nil {
 		for _, t := range v.detail.ReviewThreads.Nodes {
 			for _, c := range t.Comments.Nodes {
 				if len(findImages(c.Body)) > 0 {
-					v.invalidateFiles()
-					v.refreshSearch()
-					return
+					v.invalidate(tabFiles)
 				}
 			}
 		}
 	}
-	v.refreshSearch()
+	v.ensure()
 }
 
 // threadsKey summarizes what the diff pane renders from review threads.
@@ -470,28 +486,41 @@ func threadsKey(d *prDetail) string {
 	return sb.String()
 }
 
+// rebuild re-lays out every tab for a new width; only the visible one renders now.
 func (v *prDetailView) rebuild(width int) {
 	// Width is 0 until the first WindowSizeMsg; cards need room for their borders.
 	v.width = max(width, 40)
-	v.rebuildConv()
-	v.rebuildCommits()
-	v.rebuildChecks()
-	v.invalidateFiles()
-	v.refreshSearch()
+	v.invalidate(tabConversation, tabFiles, tabCommits, tabChecks)
+	v.ensure()
 }
 
-// invalidateFiles marks the diff pane stale; it's the costly one, so it's only
-// rendered when the Files tab is on screen (see ensureFiles).
-func (v *prDetailView) invalidateFiles() {
-	v.filesDirty = true
+// invalidate marks tabs stale. Panes render lazily (see ensure), so resizes and
+// data updates only pay for the tab on screen.
+func (v *prDetailView) invalidate(tabs ...int) {
+	for _, t := range tabs {
+		v.dirty[t] = true
+	}
 }
 
-// ensureFiles renders a stale diff pane if the Files tab is showing; Update
-// calls it after every message.
-func (v *prDetailView) ensureFiles() {
-	if v.filesDirty && v.tab == tabFiles {
+func (v *prDetailView) invalidateFiles() { v.invalidate(tabFiles) }
+
+// ensure renders the visible tab if it's stale; Update calls it after every message.
+func (v *prDetailView) ensure() {
+	if !v.dirty[v.tab] {
+		return
+	}
+	v.dirty[v.tab] = false
+	switch v.tab {
+	case tabConversation:
+		v.rebuildConv()
+	case tabCommits:
+		v.rebuildCommits()
+	case tabChecks:
+		v.rebuildChecks()
+	case tabFiles:
 		v.rebuildFilesKeepingPlace()
 	}
+	v.refreshSearch()
 }
 
 // currentFile is the index of the file at the top of the files pane, or -1.
@@ -516,7 +545,7 @@ func (v *prDetailView) rebuildFilesKeepingPlace() {
 }
 
 func (v *prDetailView) rebuildFiles() {
-	v.filesDirty = false
+	v.dirty[tabFiles] = false
 	p := &v.panes[tabFiles]
 	if v.diff == nil {
 		p.lines, p.marks, v.threadMarks = nil, nil, nil

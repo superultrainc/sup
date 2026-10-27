@@ -803,8 +803,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	next, cmd := m.update(msg)
 	if nm := next.(model); nm.detail != nil {
-		// The diff pane renders lazily, only once the Files tab is showing.
-		nm.detail.ensureFiles()
+		// Panes render lazily, only once their tab is showing.
+		nm.detail.ensure()
 		nm.detail.clampScroll(nm.height)
 	}
 	// Any rebuild may have queued image transmissions for the next frame.

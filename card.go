@@ -94,8 +94,28 @@ func textCard(title, border string, body []string, width int) []string {
 
 var mdRenderers = map[int]*glamour.TermRenderer{}
 
+type mdKey struct {
+	width int
+	body  string
+}
+
+// mdCache memoizes rendered markdown: glamour costs ~0.5ms per comment and
+// the conversation re-renders on every refresh, image load, and resize.
+var mdCache = map[mdKey][]string{}
+
 // markdownLines renders GitHub markdown to lines at most width cells wide.
+// Callers must not modify the returned slice; it's shared via mdCache.
 func markdownLines(body string, width int) []string {
+	key := mdKey{width, body}
+	if lines, ok := mdCache[key]; ok {
+		return lines
+	}
+	lines := renderMarkdown(body, width)
+	mdCache[key] = lines
+	return lines
+}
+
+func renderMarkdown(body string, width int) []string {
 	body = cleanBody(body)
 	if body == "" {
 		return nil
@@ -136,5 +156,6 @@ func markdownLines(body string, width int) []string {
 	for len(lines) > 0 && blank(lines[len(lines)-1]) {
 		lines = lines[:len(lines)-1]
 	}
-	return lines
+	// Cap capacity so a caller's append copies instead of writing into the cached array.
+	return lines[:len(lines):len(lines)]
 }

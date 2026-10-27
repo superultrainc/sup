@@ -186,12 +186,37 @@ func loadCachedPRs() []PR {
 	return prs
 }
 
+// savePRsToCache writes atomically so quitting mid-write can't truncate the cache.
 func savePRsToCache(prs []PR) {
 	data, err := json.Marshal(prs)
 	if err != nil {
 		return
 	}
-	os.WriteFile(getCacheFilePath(), data, 0644)
+	path := getCacheFilePath()
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, data, 0644) == nil {
+		os.Rename(tmp, path)
+	}
+}
+
+type savePRsMsg struct{}
+
+// markPRsDirty coalesces cache writes: a refresh delivers ~one response per PR,
+// so the list is saved once the burst settles instead of per response.
+func (m *model) markPRsDirty() tea.Cmd {
+	if demoMode {
+		return nil
+	}
+	m.prsDirty = true
+	if m.prsSaveScheduled {
+		return nil
+	}
+	m.prsSaveScheduled = true
+	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return savePRsMsg{} })
+}
+
+func samePR(a, b PR) bool {
+	return a.Number == b.Number && a.Repository.Name == b.Repository.Name && a.Repository.Owner.Login == b.Repository.Owner.Login
 }
 
 type PR struct {
@@ -266,6 +291,8 @@ type model struct {
 	hoverSeq          int // invalidates pending prefetch ticks when the cursor moves
 	warmQueue         []PR
 	warmInFlight      int
+	prsDirty          bool // list changed since the last cache write
+	prsSaveScheduled  bool
 }
 
 type prPageLoadedMsg struct {
@@ -856,18 +883,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		index := make(map[string]int, len(m.prs))
+		for i := range m.prs {
+			index[prKey(m.prs[i])] = i
+		}
 		for _, np := range msg.prs {
 			key := prKey(np)
 			m.refreshSeen[key] = true
-			found := false
-			for i := range m.prs {
-				if prKey(m.prs[i]) == key {
-					m.prs[i] = np
-					found = true
-					break
-				}
-			}
-			if !found {
+			if i, ok := index[key]; ok {
+				m.prs[i] = np
+			} else {
+				index[key] = len(m.prs)
 				m.prs = append(m.prs, np)
 			}
 		}
@@ -890,9 +916,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.prs = kept
-			if !demoMode {
-				savePRsToCache(m.prs)
-			}
 			m.refreshing = false
 		}
 
@@ -905,9 +928,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Fresh updatedAt/head values: re-warm anything that changed.
 		if !m.refreshing {
-			return m, tea.Batch(next, m.enqueueWarm())
+			return m, tea.Batch(next, m.enqueueWarm(), m.markPRsDirty())
 		}
 		return m, next
+
+	case savePRsMsg:
+		m.prsSaveScheduled = false
+		if m.prsDirty {
+			m.prsDirty = false
+			savePRsToCache(m.prs)
+		}
+		return m, nil
 
 	case tickMsg:
 		if m.visibleCount < len(m.filtered) {
@@ -979,22 +1010,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		for i := range m.prs {
-			if m.prs[i].Number == msg.pr.Number &&
-				m.prs[i].Repository.Name == msg.pr.Repository.Name &&
-				m.prs[i].Repository.Owner.Login == msg.pr.Repository.Owner.Login {
+			if samePR(m.prs[i], msg.pr) {
 				m.prs[i] = msg.pr
 				break
 			}
 		}
-		if m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr) {
+		if m.detail != nil && samePR(m.detail.pr, msg.pr) {
 			m.detail.pr = msg.pr
 		}
 		// Every active filter (repo, status, author) must survive the rebuild, not just typed text.
 		m.applyFilterKeepingCursor()
-		if !demoMode {
-			savePRsToCache(m.prs)
-		}
-		return m, nil
+		return m, m.markPRsDirty()
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -1173,13 +1199,17 @@ func (m *model) applyFilter() {
 
 // applyFilterKeepingCursor re-filters after data changes without moving the selection.
 func (m *model) applyFilterKeepingCursor() {
-	var selected string
+	var selected *PR
 	if m.cursor < len(m.filtered) {
-		selected = prKey(m.filtered[m.cursor])
+		pr := m.filtered[m.cursor]
+		selected = &pr
 	}
 	m.applyFilter()
+	if selected == nil {
+		return
+	}
 	for i, pr := range m.filtered {
-		if prKey(pr) == selected {
+		if samePR(pr, *selected) {
 			m.cursor = i
 			break
 		}
@@ -2013,6 +2043,9 @@ func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
 	kittyFreeAll()
+	if fm, ok := finalModel.(model); ok && fm.prsDirty {
+		savePRsToCache(fm.prs)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

@@ -111,6 +111,8 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 
 `A`, `D`, `M`, `o`, and `c` work from here too.
 
+The mouse works too: click a tab to switch, click a file in the tree to jump to it, and scroll with the wheel. In the list, click a PR to select it and click it again to open it. Hold Option (or Shift, depending on your terminal) to select text.
+
 PRs open instantly once cached: sup prefetches the PR under the cursor, keeps a disk cache in `~/.cache/sup/prs`, and refreshes in the background. The diff is only refetched when the PR's head commit changes.
 
 ## Configuration (optional)

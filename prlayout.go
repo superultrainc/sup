@@ -86,6 +86,20 @@ func (v *prDetailView) tabCounts() [tabCount]int {
 	return c
 }
 
+// tabSpans returns each tab's [start, end) column on the tab row; it must
+// match the layout in detailHeader: " " then name + " " + chip, joined by 3 spaces.
+func (v *prDetailView) tabSpans() [tabCount][2]int {
+	var spans [tabCount][2]int
+	counts := v.tabCounts()
+	x := 1
+	for i, name := range tabNames {
+		w := lipgloss.Width(name) + 1 + lipgloss.Width(fmt.Sprint(counts[i])) + 2
+		spans[i] = [2]int{x, x + w}
+		x += w + 3
+	}
+	return spans
+}
+
 func (m model) detailHeader() []string {
 	v := m.detail
 	d := v.detail
@@ -203,7 +217,7 @@ func (m model) paneRows(height int) []string {
 		side, sideW = v.sidebar, v.sidebarWidth()
 	case v.tab == tabFiles && v.treeWidth() > 0:
 		sideW = v.treeWidth()
-		side = fileTree(v.diff, v.currentFile(), v.detail, sideW, height)
+		side, _ = fileTree(v.diff, v.currentFile(), v.detail, sideW, height)
 	}
 	if sideW == 0 {
 		return visible

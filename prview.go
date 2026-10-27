@@ -375,7 +375,12 @@ func (v *prDetailView) maxScroll(termHeight int) int {
 func (v *prDetailView) clampScroll(termHeight int) {
 	for i := range v.panes {
 		p := &v.panes[i]
-		p.scroll = max(min(p.scroll, len(p.lines)-v.bodyHeight(termHeight)), 0)
+		limit := len(p.lines) - v.bodyHeight(termHeight)
+		// Let the last files reach the top so jumping to them highlights them in the tree.
+		if i == tabFiles && len(p.marks) > 0 {
+			limit = max(limit, p.marks[len(p.marks)-1])
+		}
+		p.scroll = max(min(p.scroll, limit), 0)
 	}
 }
 

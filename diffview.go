@@ -713,7 +713,9 @@ func fetchPRPatch(pr PR) ([]byte, error) {
 
 // fileTree is the Files tab's left column: files grouped under their
 // directory, with the file at the top of the diff highlighted.
-func fileTree(files []*diffFile, current int, d *prDetail, width, height int) []string {
+// fileAt maps each returned line to its file index (-1 for headers and
+// directories) so clicks can be resolved.
+func fileTree(files []*diffFile, current int, d *prDetail, width, height int) (lines []string, fileAt []int) {
 	th := currentDiffTheme()
 	muted := sty(th.muted, "", false, false)
 	threads := map[string]int{}
@@ -766,14 +768,16 @@ func fileTree(files []*diffFile, current int, d *prDetail, width, height int) []
 		rows = append(rows, row{ansi.Truncate(line, width, ""), i})
 	}
 
-	out := []string{sty(th.muted, "", true, false).Render(" Files ") + chip(fmt.Sprint(len(files)), th.text, th.chipBg), ""}
-	listH := max(height-len(out), 1)
+	lines = []string{sty(th.muted, "", true, false).Render(" Files ") + chip(fmt.Sprint(len(files)), th.text, th.chipBg), ""}
+	fileAt = []int{-1, -1}
+	listH := max(height-len(lines), 1)
 	start := 0
 	if curRow >= listH {
 		start = min(curRow-listH/2, len(rows)-listH)
 	}
 	for _, r := range rows[max(start, 0):min(max(start, 0)+listH, len(rows))] {
-		out = append(out, r.text)
+		lines = append(lines, r.text)
+		fileAt = append(fileAt, r.file)
 	}
-	return out
+	return lines, fileAt
 }

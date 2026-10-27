@@ -29,8 +29,9 @@ type diffTheme struct {
 	delBg, delEmph, delBar, delNum string
 	sepBg, sepFg, numFg, emptyBg   string
 	divider, border, threadBorder  string
-	text, muted, band, authorBand  string // GitHub's text, secondary text, and comment-header fills
+	text, muted, band, authorBand  string // band/authorBand fill card header rows; empty means no fill
 	chipBg, branchFg, branchBg     string
+	selBg                          string // selected row in the file tree
 	accent                         string // active tab underline
 }
 
@@ -41,8 +42,8 @@ var darkDiffTheme = diffTheme{
 	delBg: "#2a1418", delEmph: "#6e2229", delBar: "#f85149", delNum: "#ffa198",
 	sepBg: "#161b22", sepFg: "#8b949e", numFg: "#6e7681", emptyBg: "#14181f",
 	divider: "#30363d", border: "#3d444d", threadBorder: "#d29922",
-	text: "#e6edf3", muted: "#8b949e", band: "#161b22", authorBand: "#13233a",
-	chipBg: "#30363d", branchFg: "#58a6ff", branchBg: "#121d2f", accent: "#f78166",
+	text: "#e6edf3", muted: "#8b949e",
+	chipBg: "#30363d", branchFg: "#58a6ff", branchBg: "#121d2f", accent: "#f78166", selBg: "#161b22",
 }
 
 var lightDiffTheme = diffTheme{
@@ -51,8 +52,8 @@ var lightDiffTheme = diffTheme{
 	delBg: "#ffebe9", delEmph: "#ffc1bf", delBar: "#cf222e", delNum: "#cf222e",
 	sepBg: "#f6f8fa", sepFg: "#57606a", numFg: "#8c959f", emptyBg: "#f6f8fa",
 	divider: "#d0d7de", border: "#d0d7de", threadBorder: "#bf8700",
-	text: "#1f2328", muted: "#59636e", band: "#f6f8fa", authorBand: "#ddf4ff",
-	chipBg: "#d1d9e0", branchFg: "#0969da", branchBg: "#ddf4ff", accent: "#fd8c73",
+	text: "#1f2328", muted: "#59636e",
+	chipBg: "#d1d9e0", branchFg: "#0969da", branchBg: "#ddf4ff", accent: "#fd8c73", selBg: "#f6f8fa",
 }
 
 func currentDiffTheme() diffTheme {
@@ -747,7 +748,7 @@ func fileTree(files []*diffFile, current int, d *prDetail, width, height int) (l
 		}
 		bg := ""
 		if i == current {
-			bg = th.band
+			bg = th.selBg
 			curRow = len(rows)
 		}
 		stats := sty(th.addBar, bg, false, false).Render(fmt.Sprintf("+%d", f.additions)) +

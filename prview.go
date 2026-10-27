@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/styles"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -205,17 +206,39 @@ func relTime(t time.Time) string {
 	}
 }
 
-// prDetailView is the full-screen PR view state. lines is rebuilt in Update
-// (on load and resize) so View stays a pure function.
+// detailPane is one scrollable tab. lines are rebuilt in Update (on load,
+// resize, or layout toggles) so View stays a pure function.
+type detailPane struct {
+	lines  []string
+	marks  []int // [ / ] jump targets
+	scroll int
+}
+
+const (
+	tabConversation = iota
+	tabFiles
+)
+
 type prDetailView struct {
-	pr       PR
-	detail   *prDetail
-	loading  bool
-	err      error
-	scroll   int
-	lines    []string
-	sections []int // line index of each section heading, for [ / ]
-	width    int
+	pr          PR
+	detail      *prDetail
+	loading     bool
+	err         error
+	tab         int
+	conv, files detailPane
+	activity    int   // timeline item count, shown on the tab
+	threadMarks []int // n / N jump targets in the files tab
+	diff        []*diffFile
+	diffLoading bool
+	diffErr     error
+	layout      string // auto, split, unified
+	wrap        bool
+	collapsed   map[string]bool // per-path override of the default collapse rule
+	width       int
+}
+
+func newDetailView(pr PR) *prDetailView {
+	return &prDetailView{pr: pr, loading: true, diffLoading: true, layout: "auto", wrap: true, collapsed: map[string]bool{}}
 }
 
 var (
@@ -223,101 +246,100 @@ var (
 	authorStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252"))
 	metaStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	pathStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
-	hunkCtxStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	activeTabStyle   = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(lipgloss.Color("205"))
 )
 
-// detailHeaderHeight is the number of fixed rows above the scrolling body.
+// detailHeaderHeight is the fixed rows above the body: header card (6) + tabs (1).
 const detailHeaderHeight = 7
 
-func (v *prDetailView) bodyHeight(termHeight int) int {
-	h := termHeight - detailHeaderHeight - 2 // footer rows
-	if h < 3 {
-		h = 3
+func (v *prDetailView) pane() *detailPane {
+	if v.tab == tabFiles {
+		return &v.files
 	}
-	return h
+	return &v.conv
+}
+
+func (v *prDetailView) bodyHeight(termHeight int) int {
+	return max(termHeight-detailHeaderHeight-2, 3) // 2 footer rows
 }
 
 func (v *prDetailView) maxScroll(termHeight int) int {
-	m := len(v.lines) - v.bodyHeight(termHeight)
-	if m < 0 {
-		return 0
-	}
-	return m
+	return max(len(v.pane().lines)-v.bodyHeight(termHeight), 0)
 }
 
 func (v *prDetailView) clampScroll(termHeight int) {
-	if v.scroll > v.maxScroll(termHeight) {
-		v.scroll = v.maxScroll(termHeight)
-	}
-	if v.scroll < 0 {
-		v.scroll = 0
+	for _, p := range []*detailPane{&v.conv, &v.files} {
+		p.scroll = min(p.scroll, max(len(p.lines)-v.bodyHeight(termHeight), 0))
+		p.scroll = max(p.scroll, 0)
 	}
 }
 
-func (v *prDetailView) jumpSection(dir int) {
+func jumpMark(p *detailPane, marks []int, dir int) {
 	if dir > 0 {
-		for _, s := range v.sections {
-			if s > v.scroll {
-				v.scroll = s
+		for _, s := range marks {
+			if s > p.scroll {
+				p.scroll = s
 				return
 			}
 		}
 		return
 	}
-	for i := len(v.sections) - 1; i >= 0; i-- {
-		if v.sections[i] < v.scroll {
-			v.scroll = v.sections[i]
+	for i := len(marks) - 1; i >= 0; i-- {
+		if marks[i] < p.scroll {
+			p.scroll = marks[i]
 			return
 		}
 	}
-	v.scroll = 0
+	p.scroll = 0
 }
 
-// timelineItem is one entry in the activity section, sorted by time.
-type timelineItem struct {
-	at     time.Time
-	render func(b *detailBuilder)
-}
-
-type detailBuilder struct {
-	lines    []string
-	sections []int
-	width    int
-	md       *glamour.TermRenderer
-}
-
-func (b *detailBuilder) line(s string) { b.lines = append(b.lines, s) }
-
-func (b *detailBuilder) section(title string) {
-	if len(b.lines) > 0 {
-		b.line("")
+func (v *prDetailView) isSplit() bool {
+	switch v.layout {
+	case "split":
+		return true
+	case "unified":
+		return false
 	}
-	b.sections = append(b.sections, len(b.lines))
-	b.line(" " + sectionHeadStyle.Render(title))
-	b.line(" " + metaStyle.Render(strings.Repeat("─", max(b.width-2, 10))))
+	return v.width >= 150
 }
 
-// markdown renders body indented by indent spaces.
-func (b *detailBuilder) markdown(body string, indent int) {
-	body = cleanBody(body)
-	if body == "" {
-		b.line(strings.Repeat(" ", indent) + metaStyle.Render("(no description)"))
-		return
-	}
-	out := body
-	if b.md != nil {
-		if r, err := b.md.Render(body); err == nil {
-			out = r
+func (v *prDetailView) rebuild(width int) {
+	v.width = width
+	v.rebuildConv()
+	v.rebuildFiles()
+}
+
+// currentFile is the index of the file card at the top of the files pane, or -1.
+func (v *prDetailView) currentFile() int {
+	cur := -1
+	for i, mk := range v.files.marks {
+		if mk <= v.files.scroll+1 {
+			cur = i
 		}
 	}
-	lines := strings.Split(strings.TrimRight(out, "\n "), "\n")
-	for len(lines) > 0 && strings.TrimSpace(stripAnsi(lines[0])) == "" {
-		lines = lines[1:]
+	return cur
+}
+
+// rebuildFilesKeepingPlace re-renders after a layout toggle and returns to the same file.
+func (v *prDetailView) rebuildFilesKeepingPlace() {
+	cur := v.currentFile()
+	v.rebuildFiles()
+	if cur >= 0 && cur < len(v.files.marks) {
+		v.files.scroll = v.files.marks[cur]
 	}
-	pad := strings.Repeat(" ", indent)
-	for _, l := range lines {
-		b.line(pad + strings.TrimRight(l, " "))
+}
+
+func (v *prDetailView) rebuildFiles() {
+	if v.diff == nil {
+		v.files.lines, v.files.marks, v.threadMarks = nil, nil, nil
+		return
 	}
+	r := &diffRenderer{th: currentDiffTheme(), width: v.width - 2, split: v.isSplit(), wrap: v.wrap, collapsed: v.collapsed}
+	if v.detail != nil {
+		r.threads = v.detail.ReviewThreads.Nodes
+	}
+	r.render(v.diff)
+	v.files.lines, v.files.marks, v.threadMarks = r.lines, r.fileMarks, r.threadMarks
 }
 
 func reviewStateLabel(state string) (string, lipgloss.Style) {
@@ -333,94 +355,148 @@ func reviewStateLabel(state string) (string, lipgloss.Style) {
 	}
 }
 
-func (v *prDetailView) rebuild(width int) {
-	v.width = width
+func reviewBorder(state string, th diffTheme) string {
+	switch state {
+	case "APPROVED":
+		return th.addBar
+	case "CHANGES_REQUESTED":
+		return th.delBar
+	}
+	return th.border
+}
+
+// timelineItem is one entry in the activity feed, sorted by time.
+type timelineItem struct {
+	at     time.Time
+	render func(width int) []string
+}
+
+func (v *prDetailView) rebuildConv() {
 	d := v.detail
 	if d == nil {
-		v.lines, v.sections = nil, nil
+		v.conv.lines, v.conv.marks = nil, nil
 		return
 	}
-	// glamour's document style adds a 2-col margin on each side.
-	md, _ := glamour.NewTermRenderer(
-		glamour.WithStandardStyle(glamourStyle),
-		glamour.WithWordWrap(max(width-8, 20)),
-		glamour.WithEmoji(),
-	)
-	b := &detailBuilder{width: width, md: md}
-
-	b.section("Description")
-	b.markdown(d.Body, 1)
-
-	b.section("Checks")
-	b.checks(d)
-
-	b.section(fmt.Sprintf("Files (%d)", d.ChangedFiles))
-	addW, delW := 0, 0
-	for _, f := range d.Files.Nodes {
-		addW = max(addW, len(fmt.Sprintf("+%d", f.Additions)))
-		delW = max(delW, len(fmt.Sprintf("-%d", f.Deletions)))
+	th := currentDiffTheme()
+	cw := v.width - 2 // card width; lines get a 1-col left margin
+	var lines []string
+	var marks []int
+	add := func(ls ...string) {
+		for _, l := range ls {
+			lines = append(lines, " "+l)
+		}
 	}
-	for _, f := range d.Files.Nodes {
-		adds := additionsStyle.Render(padLeft(fmt.Sprintf("+%d", f.Additions), addW))
-		dels := deletionsStyle.Render(padLeft(fmt.Sprintf("-%d", f.Deletions), delW))
-		b.line("   " + adds + " " + dels + "  " + pathStyle.Render(f.Path))
+
+	marks = append(marks, len(lines))
+	desc := markdownLines(d.Body, cw-4)
+	if len(desc) == 0 {
+		desc = []string{metaStyle.Render("No description provided.")}
 	}
-	if d.ChangedFiles > len(d.Files.Nodes) {
-		b.line("   " + metaStyle.Render(fmt.Sprintf("… %d more", d.ChangedFiles-len(d.Files.Nodes))))
+	add(textCard(sectionHeadStyle.Render("Description"), th.border, desc, cw)...)
+
+	if checks, summary := checkLines(d); len(checks) > 0 {
+		add("")
+		marks = append(marks, len(lines))
+		add(textCard(sectionHeadStyle.Render("Checks")+metaStyle.Render(" · ")+summary, th.border, checks, cw)...)
 	}
 
 	var items []timelineItem
 	for _, c := range d.Comments.Nodes {
 		c := c
-		items = append(items, timelineItem{at: c.CreatedAt, render: func(b *detailBuilder) {
-			b.line(" " + commentedStyle.Render("●") + " " + authorStyle.Render(c.Author.Login) + metaStyle.Render(" commented · "+relTime(c.CreatedAt)))
-			b.markdown(c.Body, 2)
+		items = append(items, timelineItem{c.CreatedAt, func(w int) []string {
+			title := commentedStyle.Render("●") + " " + authorStyle.Render(c.Author.Login) + metaStyle.Render(" commented · "+relTime(c.CreatedAt))
+			return textCard(title, th.border, markdownLines(c.Body, w-4), w)
 		}})
 	}
 	for _, r := range d.Reviews.Nodes {
 		r := r
-		// Empty COMMENTED reviews are just containers for inline threads, shown below.
+		// Empty COMMENTED reviews only wrap inline threads, which appear on their own.
 		if r.State == "PENDING" || (r.State == "COMMENTED" && cleanBody(r.Body) == "") {
 			continue
 		}
-		items = append(items, timelineItem{at: r.SubmittedAt, render: func(b *detailBuilder) {
+		items = append(items, timelineItem{r.SubmittedAt, func(w int) []string {
 			label, style := reviewStateLabel(r.State)
-			b.line(" " + style.Render("◆") + " " + authorStyle.Render(r.Author.Login) + " " + style.Render(label) + metaStyle.Render(" · "+relTime(r.SubmittedAt)))
-			if cleanBody(r.Body) != "" {
-				b.markdown(r.Body, 2)
+			title := authorStyle.Render(r.Author.Login) + " " + style.Render(label) + metaStyle.Render(" · "+relTime(r.SubmittedAt))
+			body := markdownLines(r.Body, w-4)
+			if len(body) == 0 {
+				return []string{"  " + title}
 			}
+			return textCard(title, reviewBorder(r.State, th), body, w)
 		}})
 	}
+	style := styles.Get(th.chroma)
 	for _, t := range d.ReviewThreads.Nodes {
 		t := t
 		if len(t.Comments.Nodes) == 0 {
 			continue
 		}
-		items = append(items, timelineItem{at: t.Comments.Nodes[0].CreatedAt, render: func(b *detailBuilder) {
-			b.thread(t)
+		items = append(items, timelineItem{t.Comments.Nodes[0].CreatedAt, func(w int) []string {
+			return threadCard(t, threadLocation(t), threadSnippet(t, style, w-4, th), w, th)
 		}})
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].at.Before(items[j].at) })
+	v.activity = len(items)
 
-	b.section(fmt.Sprintf("Activity (%d)", len(items)))
+	add("")
+	marks = append(marks, len(lines))
+	add(sectionHeadStyle.Render("Activity") + metaStyle.Render(fmt.Sprintf(" · %d", len(items))))
 	if len(items) == 0 {
-		b.line(" " + metaStyle.Render("No comments or reviews yet."))
+		add(metaStyle.Render("  No comments or reviews yet."))
 	}
-	for i, it := range items {
-		if i > 0 {
-			b.line("")
-		}
-		it.render(b)
+	connector := sty(th.divider, "", false, false).Render("  │")
+	for _, it := range items {
+		add(connector)
+		marks = append(marks, len(lines))
+		add(it.render(cw)...)
 	}
-
-	v.lines, v.sections = b.lines, b.sections
+	v.conv.lines, v.conv.marks = lines, marks
 }
 
-func (b *detailBuilder) checks(d *prDetail) {
-	if len(d.Commits.Nodes) == 0 || d.Commits.Nodes[0].Commit.StatusCheckRollup == nil {
-		b.line(" " + metaStyle.Render("No checks."))
-		return
+func threadLocation(t reviewThread) string {
+	loc := t.Path
+	switch {
+	case t.Line != nil:
+		loc = fmt.Sprintf("%s:%d", t.Path, *t.Line)
+	case t.OriginalLine != nil:
+		loc = fmt.Sprintf("%s:%d", t.Path, *t.OriginalLine)
 	}
+	if t.IsOutdated {
+		loc += " · outdated"
+	}
+	return pathStyle.Render(loc)
+}
+
+// threadSnippet renders the last few diff lines a thread is attached to.
+func threadSnippet(t reviewThread, style *chroma.Style, width int, th diffTheme) []string {
+	hunk := t.Comments.Nodes[0].DiffHunk
+	if hunk == "" {
+		return nil
+	}
+	files := parseUnifiedDiff(fmt.Sprintf("diff --git a/%[1]s b/%[1]s\n--- a/%[1]s\n+++ b/%[1]s\n%[2]s", t.Path, hunk))
+	if len(files) == 0 || len(files[0].hunks) == 0 {
+		return nil
+	}
+	f := files[0]
+	highlightFile(f, style)
+	lines := f.hunks[0].lines
+	if len(lines) > 4 {
+		lines = lines[len(lines)-4:]
+	}
+	r := &diffRenderer{th: th, width: width + 2}
+	nw := numWidth(f)
+	var out []string
+	for i := range lines {
+		out = append(out, r.unifiedRows(&lines[i], nw)...)
+	}
+	return out
+}
+
+func checkLines(d *prDetail) ([]string, string) {
+	if len(d.Commits.Nodes) == 0 || d.Commits.Nodes[0].Commit.StatusCheckRollup == nil {
+		return nil, ""
+	}
+	var out []string
+	passed, failed, pending := 0, 0, 0
 	for _, c := range d.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.Nodes {
 		name, result := c.Name, c.Conclusion
 		if c.Typename == "StatusContext" {
@@ -428,72 +504,59 @@ func (b *detailBuilder) checks(d *prDetail) {
 		} else if result == "" {
 			result = c.Status
 		}
-		b.line("   " + checkIcon(result) + " " + name + metaStyle.Render(" "+strings.ToLower(result)))
+		switch checkState(result) {
+		case 1:
+			passed++
+		case -1:
+			failed++
+		default:
+			pending++
+		}
+		out = append(out, checkIcon(result)+" "+name+metaStyle.Render(" "+strings.ToLower(result)))
 	}
+	var parts []string
+	if passed > 0 {
+		parts = append(parts, approvedStyle.Render(fmt.Sprintf("✓ %d passed", passed)))
+	}
+	if failed > 0 {
+		parts = append(parts, changesRequestedStyle.Render(fmt.Sprintf("✗ %d failed", failed)))
+	}
+	if pending > 0 {
+		parts = append(parts, reviewRequestedStyle.Render(fmt.Sprintf("● %d pending", pending)))
+	}
+	return out, strings.Join(parts, "  ")
+}
+
+// checkState is 1 for passed, -1 for failed, 0 for pending.
+func checkState(result string) int {
+	switch result {
+	case "SUCCESS", "NEUTRAL", "SKIPPED":
+		return 1
+	case "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE":
+		return -1
+	}
+	return 0
 }
 
 func checkIcon(result string) string {
-	switch result {
-	case "SUCCESS", "NEUTRAL", "SKIPPED":
+	switch checkState(result) {
+	case 1:
 		return approvedStyle.Render("✓")
-	case "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE":
+	case -1:
 		return changesRequestedStyle.Render("✗")
-	default:
-		return reviewRequestedStyle.Render("●")
 	}
-}
-
-func (b *detailBuilder) thread(t reviewThread) {
-	loc := t.Path
-	if t.Line != nil {
-		loc = fmt.Sprintf("%s:%d", t.Path, *t.Line)
-	} else if t.OriginalLine != nil {
-		loc = fmt.Sprintf("%s:%d", t.Path, *t.OriginalLine)
-	}
-	var flags []string
-	if t.IsResolved {
-		flags = append(flags, approvedStyle.Render("resolved"))
-	}
-	if t.IsOutdated {
-		flags = append(flags, draftStyle.Render("outdated"))
-	}
-	head := " " + reviewRequestedStyle.Render("▸") + " " + pathStyle.Render(loc)
-	if len(flags) > 0 {
-		head += " " + strings.Join(flags, " ")
-	}
-	b.line(head)
-
-	// Last few lines of the diff hunk give the comment its code context.
-	if hunkText := t.Comments.Nodes[0].DiffHunk; hunkText != "" {
-		hl := strings.Split(strings.TrimRight(hunkText, "\n"), "\n")
-		if len(hl) > 4 {
-			hl = hl[len(hl)-4:]
-		}
-		for _, l := range hl {
-			style := hunkCtxStyle
-			switch {
-			case strings.HasPrefix(l, "+"):
-				style = additionsStyle
-			case strings.HasPrefix(l, "-"):
-				style = deletionsStyle
-			}
-			b.line("   " + metaStyle.Render("│ ") + style.Render(truncate(l, max(b.width-8, 20))))
-		}
-	}
-	for _, c := range t.Comments.Nodes {
-		b.line("   " + authorStyle.Render(c.Author.Login) + metaStyle.Render(" · "+relTime(c.CreatedAt)))
-		b.markdown(c.Body, 3)
-	}
+	return reviewRequestedStyle.Render("●")
 }
 
 func (m model) detailView() string {
 	v := m.detail
 	d := v.detail
+	th := currentDiffTheme()
 	var s strings.Builder
-	width := max(m.width-2, 40)
+	cw := max(m.width-2, 40)
 
 	slug := fmt.Sprintf("%s/%s #%d", v.pr.Repository.Owner.Login, v.pr.Repository.Name, v.pr.Number)
-	s.WriteString("\n " + titleStyle.Render("sup") + metaStyle.Render(" › ") + normalStyle.Render(slug) + "  " + getStatusBadge(v.pr) + "\n")
+	cardTitle := titleStyle.Render("sup") + metaStyle.Render(" › ") + normalStyle.Render(slug) + "  " + getStatusBadge(v.pr)
 
 	title, author, head, base := v.pr.Title, v.pr.Author.Login, v.pr.HeadRefName, ""
 	adds, dels := v.pr.Additions, v.pr.Deletions
@@ -501,8 +564,6 @@ func (m model) detailView() string {
 		title, author, head, base = d.Title, d.Author.Login, d.HeadRefName, d.BaseRefName
 		adds, dels = d.Additions, d.Deletions
 	}
-	s.WriteString(" " + selectedNormalStyle.Render(truncate(title, width)) + "\n")
-
 	branches := branchStyle.Render(head)
 	if base != "" {
 		branches = branchStyle.Render(base) + metaStyle.Render(" ← ") + branches
@@ -510,28 +571,41 @@ func (m model) detailView() string {
 	meta := authorStyle.Render(author) + metaStyle.Render(" wants to merge ") + branches + "  " +
 		additionsStyle.Render(fmt.Sprintf("+%d", adds)) + " " + deletionsStyle.Render(fmt.Sprintf("-%d", dels))
 	if d != nil {
-		meta += metaStyle.Render(fmt.Sprintf(" · %d files · %d commits · opened %s", d.ChangedFiles, d.Commits.TotalCount, relTime(d.CreatedAt)))
+		meta += metaStyle.Render(fmt.Sprintf(" · %d commits · opened %s", d.Commits.TotalCount, relTime(d.CreatedAt)))
 	}
-	s.WriteString(" " + meta + "\n")
+	header := []string{
+		selectedNormalStyle.Render(title),
+		meta,
+		m.detailStatusLine(d),
+		detailReviewersLine(v.pr, d),
+	}
+	for _, l := range textCard(cardTitle, th.border, header, cw) {
+		s.WriteString(" " + l + "\n")
+	}
+	s.WriteString(m.detailTabs() + "\n")
 
-	s.WriteString(" " + m.detailStatusLine(d) + "\n")
-	s.WriteString(" " + detailReviewersLine(v.pr, d) + "\n")
-	s.WriteString(" " + metaStyle.Render(strings.Repeat("─", width)) + "\n")
-
+	p := v.pane()
 	bodyH := v.bodyHeight(m.height)
+	var placeholder string
 	switch {
-	case v.err != nil && d == nil:
-		s.WriteString(changesRequestedStyle.Render(" Error: "+v.err.Error()) + "\n")
-		bodyH--
-	case v.loading && d == nil:
-		s.WriteString(reviewRequestedStyle.Render(" "+spinnerFrames[m.spinnerFrame]+" Loading PR...") + "\n")
-		bodyH--
-	default:
-		end := min(v.scroll+bodyH, len(v.lines))
-		for _, l := range v.lines[v.scroll:end] {
+	case v.tab == tabConversation && v.err != nil && d == nil:
+		placeholder = changesRequestedStyle.Render("  Error: " + v.err.Error())
+	case v.tab == tabConversation && d == nil:
+		placeholder = reviewRequestedStyle.Render("  " + spinnerFrames[m.spinnerFrame] + " Loading PR...")
+	case v.tab == tabFiles && v.diffErr != nil && v.diff == nil:
+		placeholder = changesRequestedStyle.Render("  Error: " + v.diffErr.Error())
+	case v.tab == tabFiles && v.diff == nil:
+		placeholder = reviewRequestedStyle.Render("  " + spinnerFrames[m.spinnerFrame] + " Loading diff...")
+	}
+	if placeholder != "" {
+		s.WriteString("\n" + placeholder + "\n")
+		bodyH -= 2
+	} else {
+		end := min(p.scroll+bodyH, len(p.lines))
+		for _, l := range p.lines[p.scroll:end] {
 			s.WriteString(l + "\n")
 		}
-		bodyH -= end - v.scroll
+		bodyH -= end - p.scroll
 	}
 	if bodyH > 0 {
 		s.WriteString(strings.Repeat("\n", bodyH))
@@ -539,6 +613,41 @@ func (m model) detailView() string {
 
 	s.WriteString(m.detailFooter())
 	return s.String()
+}
+
+func (m model) detailTabs() string {
+	v := m.detail
+	tab := func(label string, count, idx int) string {
+		text := fmt.Sprintf("%s %d", label, count)
+		if v.tab == idx {
+			return activeTabStyle.Render(text)
+		}
+		return metaStyle.Render(text)
+	}
+	files := len(v.diff)
+	if v.diff == nil && v.detail != nil {
+		files = v.detail.ChangedFiles
+	}
+	line := "  " + tab("Conversation", v.activity, tabConversation) + "    " + tab("Files changed", files, tabFiles)
+	if v.tab == tabFiles {
+		layout := "unified"
+		if v.isSplit() {
+			layout = "split"
+		}
+		if v.layout == "auto" {
+			layout += " (auto)"
+		}
+		wrap := "wrap"
+		if !v.wrap {
+			wrap = "no wrap"
+		}
+		right := metaStyle.Render(layout + " · " + wrap)
+		gap := m.width - 1 - lipgloss.Width(line) - lipgloss.Width(right)
+		if gap > 1 {
+			line += strings.Repeat(" ", gap) + right
+		}
+	}
+	return line
 }
 
 func (m model) detailStatusLine(d *prDetail) string {
@@ -652,10 +761,13 @@ func (m model) detailFooter() string {
 
 	pct := "all"
 	if ms := v.maxScroll(m.height); ms > 0 {
-		pct = fmt.Sprintf("%d%%", v.scroll*100/ms)
+		pct = fmt.Sprintf("%d%%", v.pane().scroll*100/ms)
 	}
-	help := fmt.Sprintf(" j/k scroll · [/] section · d diff · A approve · D changes · M comment · o open · esc back  %s", pct)
-	return status + "\n" + helpStyle.Render(truncateToWidth(help, max(m.width-1, 20)))
+	help := " j/k scroll · [/] next item · tab files · d hunk · A approve · D changes · M comment · o open · esc back"
+	if v.tab == tabFiles {
+		help = " j/k scroll · [/] file · n/N comment · s layout · w wrap · x collapse · tab conversation · esc back"
+	}
+	return status + "\n" + helpStyle.Render(truncateToWidth(help+"  "+pct, max(m.width-1, 20)))
 }
 
 func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -663,36 +775,69 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleNormalInput(msg)
 	}
 	v := m.detail
+	p := v.pane()
 	page := v.bodyHeight(m.height)
 	switch msg.String() {
-	case "esc", "q", "backspace", "h", "left":
+	case "esc", "q", "backspace", "left":
 		m.detail = nil
 		m.diffError = ""
 		m.actionStatus = ""
 		return m, nil
+	case "tab", "shift+tab":
+		v.tab = 1 - v.tab
+	case "1":
+		v.tab = tabConversation
+	case "2":
+		v.tab = tabFiles
 	case "j", "down":
-		v.scroll++
+		p.scroll++
 	case "k", "up":
-		v.scroll--
+		p.scroll--
 	case "ctrl+d":
-		v.scroll += page / 2
+		p.scroll += page / 2
 	case "ctrl+u":
-		v.scroll -= page / 2
+		p.scroll -= page / 2
 	case "ctrl+f", " ", "pgdown":
-		v.scroll += page
+		p.scroll += page
 	case "ctrl+b", "pgup":
-		v.scroll -= page
+		p.scroll -= page
 	case "g", "home":
-		v.scroll = 0
+		p.scroll = 0
 	case "G", "end":
-		v.scroll = v.maxScroll(m.height)
-	case "]", "tab":
-		v.jumpSection(1)
-	case "[", "shift+tab":
-		v.jumpSection(-1)
+		p.scroll = v.maxScroll(m.height)
+	case "]":
+		jumpMark(p, p.marks, 1)
+	case "[":
+		jumpMark(p, p.marks, -1)
+	case "n":
+		if v.tab == tabFiles {
+			jumpMark(p, v.threadMarks, 1)
+		}
+	case "N":
+		if v.tab == tabFiles {
+			jumpMark(p, v.threadMarks, -1)
+		}
+	case "s":
+		if v.tab == tabFiles {
+			next := map[string]string{"auto": "split", "split": "unified", "unified": "auto"}
+			v.layout = next[v.layout]
+			v.rebuildFilesKeepingPlace()
+		}
+	case "w":
+		if v.tab == tabFiles {
+			v.wrap = !v.wrap
+			v.rebuildFilesKeepingPlace()
+		}
+	case "x":
+		if i := v.currentFile(); v.tab == tabFiles && i >= 0 && i < len(v.diff) {
+			f := v.diff[i]
+			r := diffRenderer{collapsed: v.collapsed}
+			v.collapsed[f.path()] = !r.isCollapsed(f)
+			v.rebuildFilesKeepingPlace()
+		}
 	case "R":
-		v.loading = true
-		return m, tea.Batch(fetchPRDetailCmd(v.pr), spinnerTick())
+		v.loading, v.diffLoading = true, true
+		return m, tea.Batch(fetchPRDetailCmd(v.pr), fetchPatchCmd(v.pr), spinnerTick())
 	case "d", "A", "D", "M", "o", "c":
 		return m.handleNormalInput(msg)
 	}
@@ -705,7 +850,7 @@ func mockPRDetail(pr PR) *prDetail {
 	now := time.Now()
 	d := &prDetail{
 		Title:          pr.Title,
-		Body:           "## Summary\n\nThis PR adds the thing.\n\n- Adds `NewThing()` with tests\n- Wires it into the router\n\n## Test plan\n\n- [x] `make test`\n- [ ] Manual QA on staging",
+		Body:           "## Summary\n\nValidates `Config` up front so `NewThing` can't return a half-built `Thing`.\n\n- Rejects empty names and non-positive timeouts\n- Wraps `/things` in a 5s timeout\n\n## Test plan\n\n- [x] `make test`\n- [ ] Manual QA on staging",
 		State:          "OPEN",
 		IsDraft:        pr.IsDraft,
 		CreatedAt:      now.Add(-72 * time.Hour),
@@ -714,30 +859,97 @@ func mockPRDetail(pr PR) *prDetail {
 		HeadRefName:    pr.HeadRefName,
 		Additions:      pr.Additions,
 		Deletions:      pr.Deletions,
-		ChangedFiles:   3,
+		ChangedFiles:   4,
 		ReviewDecision: pr.ReviewDecision,
 		Mergeable:      "MERGEABLE",
 	}
 	d.Commits.TotalCount = 2
-	d.Files.Nodes = []prFile{
-		{"internal/thing/thing.go", 120, 4},
-		{"internal/thing/thing_test.go", 80, 0},
-		{"cmd/server/router.go", 6, 2},
-	}
 	d.Comments.Nodes = []prComment{
 		{Author: ghActor{"mike"}, Body: "Nice. Does this need a migration?", CreatedAt: now.Add(-48 * time.Hour)},
 		{Author: ghActor{pr.Author.Login}, Body: "Nope, no schema changes.", CreatedAt: now.Add(-47 * time.Hour)},
 	}
 	d.Reviews.Nodes = []prReview{
 		{Author: ghActor{"mike"}, State: "APPROVED", Body: "LGTM 🚀", SubmittedAt: now.Add(-20 * time.Hour)},
+		{Author: ghActor{"alex"}, State: "APPROVED", SubmittedAt: now.Add(-2 * time.Hour)},
 	}
-	t := reviewThread{Path: "internal/thing/thing.go", Line: line(42), DiffSide: "RIGHT"}
-	t.Comments.Nodes = []prComment{
-		{Author: ghActor{"alex"}, Body: "Should this handle `nil`?", CreatedAt: now.Add(-30 * time.Hour),
-			DiffHunk: "@@ -40,3 +40,5 @@ func NewThing() {\n \tt := &Thing{}\n+\tt.cfg = cfg\n+\treturn t"},
-		{Author: ghActor{pr.Author.Login}, Body: "Good catch, fixed.", CreatedAt: now.Add(-29 * time.Hour)},
+	t1 := reviewThread{Path: "internal/thing/thing.go", Line: line(42), DiffSide: "RIGHT", IsResolved: true}
+	t1.Comments.Nodes = []prComment{
+		{Author: ghActor{"alex"}, Body: "Should we wrap `ErrInvalidConfig` here so callers can `errors.Is` it?", CreatedAt: now.Add(-30 * time.Hour),
+			DiffHunk: "@@ -38,8 +39,10 @@ type Thing struct {\n \n func NewThing(cfg Config) (*Thing, error) {\n-\tif cfg.Name == \"\" {\n-\t\treturn nil, errors.New(\"missing name\")\n+\tif cfg.Name == \"\" || cfg.Timeout <= 0 {\n+\t\treturn nil, fmt.Errorf(\"invalid config: %+v\", cfg)"},
+		{Author: ghActor{pr.Author.Login}, Body: "Good call, done in the next commit.", CreatedAt: now.Add(-29 * time.Hour)},
 	}
-	t.IsResolved = true
-	d.ReviewThreads.Nodes = []reviewThread{t}
+	t2 := reviewThread{Path: "internal/thing/thing_test.go", Line: line(6), DiffSide: "RIGHT"}
+	t2.Comments.Nodes = []prComment{
+		{Author: ghActor{"mike"}, Body: "nit: a table-driven test would make adding cases easier.", CreatedAt: now.Add(-21 * time.Hour),
+			DiffHunk: "@@ -0,0 +1,6 @@\n+package thing\n+\n+import \"testing\"\n+\n+func TestNewThing(t *testing.T) {\n+\tif _, err := NewThing(Config{}); err == nil {"},
+	}
+	d.ReviewThreads.Nodes = []reviewThread{t1, t2}
 	return d
 }
+
+const mockPatch = `diff --git a/internal/thing/thing.go b/internal/thing/thing.go
+index 1111111..2222222 100644
+--- a/internal/thing/thing.go
++++ b/internal/thing/thing.go
+@@ -1,8 +1,9 @@
+ package thing
+
+ import (
+-	"errors"
++	"context"
++	"errors"
+ 	"fmt"
+ )
+
+ // Thing does the thing.
+@@ -38,8 +39,10 @@ type Thing struct {
+
+ func NewThing(cfg Config) (*Thing, error) {
+-	if cfg.Name == "" {
+-		return nil, errors.New("missing name")
++	if cfg.Name == "" || cfg.Timeout <= 0 {
++		return nil, fmt.Errorf("invalid config: %+v", cfg)
+ 	}
+ 	t := &Thing{}
++	t.cfg = cfg
++	t.started = time.Now()
+ 	return t, nil
+ }
+diff --git a/internal/thing/thing_test.go b/internal/thing/thing_test.go
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/internal/thing/thing_test.go
+@@ -0,0 +1,12 @@
++package thing
++
++import "testing"
++
++func TestNewThing(t *testing.T) {
++	if _, err := NewThing(Config{}); err == nil {
++		t.Fatal("expected error for empty config")
++	}
++	if _, err := NewThing(Config{Name: "a", Timeout: 1}); err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++}
+diff --git a/cmd/server/router.go b/cmd/server/router.go
+index 4444444..5555555 100644
+--- a/cmd/server/router.go
++++ b/cmd/server/router.go
+@@ -12,5 +12,5 @@ func routes(mux *http.ServeMux) {
+ 	mux.HandleFunc("/health", health)
+ 	mux.HandleFunc("/users", users)
+-	mux.HandleFunc("/things", legacyThings)
++	mux.HandleFunc("/things", withTimeout(things, 5*time.Second))
+ 	mux.HandleFunc("/admin", admin)
+ }
+diff --git a/go.sum b/go.sum
+index 6666666..7777777 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,2 +1,3 @@
+ github.com/a/b v1.0.0 h1:abc=
++github.com/c/d v1.2.0 h1:def=
+ github.com/a/b v1.0.0/go.mod h1:ghi=
+`

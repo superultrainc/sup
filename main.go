@@ -809,6 +809,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case prPatchFetchedMsg:
+		if m.detail == nil || prKey(m.detail.pr) != msg.key {
+			return m, nil
+		}
+		m.detail.diffLoading = false
+		m.detail.diffErr = msg.err
+		if msg.err == nil {
+			m.detail.diff = msg.files
+			m.detail.rebuildFiles()
+			m.detail.clampScroll(m.height)
+		}
+		return m, nil
+
 	case prDetailFetchedMsg:
 		if m.detail == nil || prKey(m.detail.pr) != msg.key {
 			return m, nil
@@ -923,7 +936,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		if m.loading || m.refreshing || m.loadingDiff || m.actionPending || (m.detail != nil && m.detail.loading) {
+		if m.loading || m.refreshing || m.loadingDiff || m.actionPending || (m.detail != nil && (m.detail.loading || m.detail.diffLoading)) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
 			return m, spinnerTick()
 		}
@@ -1407,8 +1420,9 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "v":
 		if pr, ok := m.currentPR(); ok {
-			m.detail = &prDetailView{pr: pr, loading: true}
-			return m, tea.Batch(fetchPRDetailCmd(pr), spinnerTick())
+			m.detail = newDetailView(pr)
+			m.detail.width = m.width
+			return m, tea.Batch(fetchPRDetailCmd(pr), fetchPatchCmd(pr), spinnerTick())
 		}
 		return m, nil
 
@@ -1669,7 +1683,7 @@ func (m model) helpView() string {
 		}},
 		{"Actions", [][2]string{
 			{"Enter", "Checkout PR"},
-			{"v", "Full PR view (description, checks, comments)"},
+			{"v", "Full PR view (conversation + highlighted diff)"},
 			{"d", "Review diff with inline comments (hunk: 1=split · 2=stack · 0=auto)"},
 			{"A", "Approve"},
 			{"D", "Request changes"},

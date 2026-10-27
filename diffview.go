@@ -640,7 +640,7 @@ func threadCard(t reviewThread, label string, snippet []string, width int, th di
 			body = append(body, sty(th.divider, "", false, false).Render(strings.Repeat("┄", width-4)))
 			body = append(body, sty(th.text, "", true, false).Render(c.Author.Login)+sty(th.muted, "", false, false).Render(" "+relTime(c.CreatedAt)))
 		}
-		md := markdownLines(c.Body, width-4)
+		md := richBody(c.Body, width-4)
 		if len(md) == 0 {
 			md = []string{sty(th.muted, "", false, true).Render("(empty)")}
 		}

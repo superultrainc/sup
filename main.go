@@ -777,11 +777,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case prDetailFetchedMsg:
-		m.handleDetailFetched(msg)
-		return m, nil
+		return m, m.handleDetailFetched(msg)
 
 	case diskCacheLoadedMsg:
-		m.handleDiskCacheLoaded(msg)
+		return m, m.handleDiskCacheLoaded(msg)
+
+	case imagesLoadedMsg:
+		handleImagesLoaded(msg)
+		if m.detail != nil {
+			m.detail.rebuild(m.width)
+			m.detail.clampScroll(m.height)
+		}
 		return m, nil
 
 	case hoverMsg:

@@ -107,7 +107,7 @@ func (v *prDetailView) rebuildConv() {
 		if author == d.Author.Login {
 			right = on(band, th.muted, false, "Author")
 		}
-		md := markdownLines(body, cw-4)
+		md := richBody(body, cw-4)
 		if len(md) == 0 && isDescription {
 			md = []string{sty(th.muted, "", false, true).Render("No description provided.")}
 		}
@@ -141,7 +141,7 @@ func (v *prDetailView) rebuildConv() {
 		items = append(items, timelineItem{at: r.SubmittedAt, render: func(int) []string {
 			left := on(th.band, color, true, icon+" ") + on(th.band, th.text, true, r.Author.Login) +
 				on(th.band, th.muted, false, " "+verb+" "+relTime(r.SubmittedAt))
-			return bandCard(left, "", markdownLines(r.Body, cw-4), cw, color, th.band)
+			return bandCard(left, "", richBody(r.Body, cw-4), cw, color, th.band)
 		}})
 	}
 	style := styles.Get(th.chroma)
@@ -253,7 +253,7 @@ func conversationThreadCard(t reviewThread, snippet []string, width int, th diff
 			body = append(body, sty(th.divider, "", false, false).Render(strings.Repeat("┄", width-4)))
 		}
 		body = append(body, sty(th.text, "", true, false).Render(c.Author.Login)+sty(th.muted, "", false, false).Render(" "+relTime(c.CreatedAt)))
-		body = append(body, markdownLines(c.Body, width-4)...)
+		body = append(body, richBody(c.Body, width-4)...)
 	}
 	return bandCard(left, right, body, width, th.threadBorder, th.band)
 }

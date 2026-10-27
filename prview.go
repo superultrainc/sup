@@ -17,9 +17,12 @@ type ghActor struct {
 	Login string `json:"login"`
 }
 
+// BodyHTML fields carry GitHub's signed image URLs, which private-repo
+// attachments need; see images.go.
 type prComment struct {
 	Author    ghActor   `json:"author"`
 	Body      string    `json:"body"`
+	BodyHTML  string    `json:"bodyHTML"`
 	CreatedAt time.Time `json:"createdAt"`
 	DiffHunk  string    `json:"diffHunk"`
 }
@@ -28,6 +31,7 @@ type prReview struct {
 	Author      ghActor   `json:"author"`
 	State       string    `json:"state"`
 	Body        string    `json:"body"`
+	BodyHTML    string    `json:"bodyHTML"`
 	SubmittedAt time.Time `json:"submittedAt"`
 }
 
@@ -117,6 +121,7 @@ type prLabel struct {
 type prDetail struct {
 	Title          string    `json:"title"`
 	Body           string    `json:"body"`
+	BodyHTML       string    `json:"bodyHTML"`
 	URL            string    `json:"url"`
 	State          string    `json:"state"`
 	IsDraft        bool      `json:"isDraft"`
@@ -190,7 +195,7 @@ type prDetail struct {
 const prDetailQuery = `{
 	repository(owner: "%s", name: "%s") {
 		pullRequest(number: %d) {
-			title body url state isDraft createdAt
+			title body bodyHTML url state isDraft createdAt
 			author { login }
 			baseRefName headRefName additions deletions changedFiles reviewDecision mergeable
 			headRefOid mergeStateStatus viewerCanMergeAsAdmin
@@ -210,11 +215,11 @@ const prDetailQuery = `{
 				... on CheckRun { name conclusion status checkSuite { workflowRun { workflow { name } } } }
 				... on StatusContext { context state }
 			} } } } } }
-			comments(first: 100) { nodes { author { login } body createdAt } }
-			reviews(first: 100) { nodes { author { login } state body submittedAt } }
+			comments(first: 100) { nodes { author { login } body bodyHTML createdAt } }
+			reviews(first: 100) { nodes { author { login } state body bodyHTML submittedAt } }
 			reviewThreads(first: 100) { nodes {
 				path line startLine originalLine diffSide isResolved isOutdated
-				comments(first: 50) { nodes { author { login } body createdAt diffHunk } }
+				comments(first: 50) { nodes { author { login } body bodyHTML createdAt diffHunk } }
 			} }
 		}
 	}

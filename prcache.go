@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -74,7 +75,7 @@ func (m *model) openDetail(pr PR) tea.Cmd {
 	if v.detail != nil || v.diff != nil {
 		v.rebuild(m.width)
 	}
-	cmds := append(m.fetchMissing(pr, e), spinnerTick())
+	cmds := append(m.fetchMissing(pr, e), spinnerTick(), queueImages(e.detail, false))
 	if !inMemory {
 		cmds = append(cmds, loadDiskCacheCmd(pr))
 	}
@@ -110,21 +111,27 @@ func (m *model) handleHover(msg hoverMsg) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m *model) handleDetailFetched(msg prDetailFetchedMsg) {
+// bodyHTMLRe matches bodyHTML JSON fields, whose signed image URLs change on every fetch.
+var bodyHTMLRe = regexp.MustCompile(`"bodyHTML":"(?:[^"\\]|\\.)*"`)
+
+func (m *model) handleDetailFetched(msg prDetailFetchedMsg) tea.Cmd {
 	e := m.cacheEntry(msg.key)
 	e.detailPending = false
 	changed := false
+	var images tea.Cmd
 	if msg.err == nil {
 		raw, _ := json.Marshal(msg.detail)
-		changed = !bytes.Equal(raw, e.detailJSON)
+		changed = !bytes.Equal(bodyHTMLRe.ReplaceAll(raw, nil), bodyHTMLRe.ReplaceAll(e.detailJSON, nil))
 		e.detail, e.detailJSON, e.detailAt = msg.detail, raw, time.Now()
 		if changed {
 			saveDiskCache(msg.key, e)
 		}
+		// Fresh signed URLs: download now, even on a hover prefetch.
+		images = queueImages(msg.detail, true)
 	}
 	v := m.detail
 	if v == nil || prKey(v.pr) != msg.key {
-		return
+		return images
 	}
 	v.loading = false
 	v.err = msg.err
@@ -133,6 +140,7 @@ func (m *model) handleDetailFetched(msg prDetailFetchedMsg) {
 		v.rebuild(m.width)
 		v.clampScroll(m.height)
 	}
+	return images
 }
 
 func (m *model) handlePatchFetched(msg prPatchFetchedMsg) {
@@ -222,7 +230,7 @@ func loadDiskCacheCmd(pr PR) tea.Cmd {
 }
 
 // handleDiskCacheLoaded fills gaps only; network results always win.
-func (m *model) handleDiskCacheLoaded(msg diskCacheLoadedMsg) {
+func (m *model) handleDiskCacheLoaded(msg diskCacheLoadedMsg) tea.Cmd {
 	e := m.cacheEntry(msg.key)
 	if e.detail == nil && msg.detail != nil {
 		e.detail, e.detailJSON, e.detailAt = msg.detail, msg.raw, msg.detailAt
@@ -230,9 +238,11 @@ func (m *model) handleDiskCacheLoaded(msg diskCacheLoadedMsg) {
 	if e.files == nil && msg.files != nil {
 		e.files, e.patch, e.head = msg.files, msg.patch, msg.head
 	}
+	// Cached signed URLs have likely expired, but the image disk cache may have them.
+	images := queueImages(e.detail, false)
 	v := m.detail
 	if v == nil || prKey(v.pr) != msg.key {
-		return
+		return images
 	}
 	rebuilt := false
 	if v.detail == nil && e.detail != nil {
@@ -247,6 +257,7 @@ func (m *model) handleDiskCacheLoaded(msg diskCacheLoadedMsg) {
 		v.rebuild(m.width)
 		v.clampScroll(m.height)
 	}
+	return images
 }
 
 // pruneDiskCache drops cached PRs nobody has opened in a while.

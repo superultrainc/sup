@@ -114,6 +114,8 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 
 The mouse works too: click a tab to switch, click a file in the tree to jump to it, and scroll with the wheel. In the list, click a PR to select it and click it again to open it. Hold Option (or Shift, depending on your terminal) to select text.
 
+Images in descriptions and comments render inline. Terminals with the kitty graphics protocol and Unicode placeholders (kitty, Ghostty, Rex) get full-resolution images; others get a truecolor half-block preview. Detection is automatic; set `SUP_IMAGES=kitty` or `SUP_IMAGES=blocks` to force one.
+
 PRs open instantly once cached: sup prefetches the PR under the cursor, keeps a disk cache in `~/.cache/sup/prs`, and refreshes in the background. The diff is only refetched when the PR's head commit changes.
 
 ## Configuration (optional)
@@ -122,5 +124,6 @@ PRs open instantly once cached: sup prefetches the PR under the cursor, keeps a 
 |----------|-------------|---------|
 | `SUP_ORG` | Override org detection (comma-separated) | auto-detected |
 | `SUP_DEV_DIR` | Override repo location search | auto-detected |
+| `SUP_IMAGES` | Image rendering: `kitty` or `blocks` | auto-detected |
 
 Repos are automatically found in: `~/Development`, `~/dev`, `~/projects`, `~/code`, `~/src`, `~/repos`, `~/github`, `~/git`, `~`

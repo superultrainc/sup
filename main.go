@@ -762,6 +762,16 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if f, ok := msg.(kittyFlushedMsg); ok {
+		handleKittyFlushed(f)
+		return m, scheduleKittyFlush()
+	}
+	next, cmd := m.update(msg)
+	// Any rebuild may have queued image transmissions for the next frame.
+	return next, tea.Batch(cmd, scheduleKittyFlush())
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -1651,6 +1661,12 @@ func (m model) activeFilterLabels() []string {
 }
 
 func (m model) View() string {
+	// Pending kitty image transmissions ride along at the start of the frame;
+	// they're zero-width, and drop out once flushed.
+	return strings.Join(kittyPending, "") + m.view()
+}
+
+func (m model) view() string {
 	if m.detail != nil {
 		return m.detailView()
 	}
@@ -1972,9 +1988,11 @@ func main() {
 	}
 
 	go pruneDiskCache()
+	detectImageMode()
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
+	kittyFreeAll()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

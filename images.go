@@ -232,6 +232,9 @@ func imageLines(ref imageRef, width int) []string {
 	case e.err != nil:
 		return []string{muted.Render("▣ " + truncate(label, width-24) + " · image unavailable")}
 	}
+	if imagesKitty {
+		return kittyImageLines(ref.url, e.img, width, imageMaxRow)
+	}
 	key := fmt.Sprintf("%s\x00%d", ref.url, width)
 	if lines, ok := imageRenders[key]; ok {
 		return lines

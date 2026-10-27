@@ -1,0 +1,227 @@
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"fmt"
+	"image"
+	"image/png"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/sys/unix"
+	"golang.org/x/term"
+)
+
+// Kitty graphics with Unicode placeholders: each image is transmitted once
+// as a virtual placement, then drawn by placeholder characters whose
+// foreground color names the image and whose diacritics give row/column.
+// Placeholders are ordinary text, so images scroll and redraw with the TUI.
+// See https://sw.kovidgoyal.net/kitty/graphics-protocol/#unicode-placeholders
+
+var (
+	imagesKitty         bool // set at startup by detectImageMode
+	cellPxW, cellPxH    = 10, 20
+	kittyPending        []string           // transmissions not yet written to the terminal
+	kittyIDs            = map[string]int{} // url+size -> image id
+	kittyNextID         = 1
+	kittyFlushScheduled bool
+)
+
+// detectImageMode asks the terminal whether it supports kitty graphics, before
+// the TUI owns stdin. SUP_IMAGES=kitty|blocks overrides detection.
+func detectImageMode() {
+	switch os.Getenv("SUP_IMAGES") {
+	case "kitty":
+		imagesKitty = true
+		return
+	case "blocks":
+		return
+	}
+	// WezTerm answers the graphics query but doesn't support placeholders.
+	if strings.EqualFold(os.Getenv("TERM_PROGRAM"), "WezTerm") {
+		return
+	}
+	in, out := int(os.Stdin.Fd()), int(os.Stdout.Fd())
+	if !term.IsTerminal(in) || !term.IsTerminal(out) {
+		return
+	}
+	old, err := term.MakeRaw(in)
+	if err != nil {
+		return
+	}
+	defer term.Restore(in, old)
+
+	// Graphics query, cell size in pixels, then primary device attributes,
+	// which every terminal answers last; reading until it arrives drains the replies.
+	os.Stdout.WriteString("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c")
+	reply := readUntilDA1(in, 500*time.Millisecond)
+
+	imagesKitty = strings.Contains(reply, "_Gi=31;OK")
+	if m := regexp.MustCompile(`\x1b\[6;(\d+);(\d+)t`).FindStringSubmatch(reply); m != nil {
+		h, _ := strconv.Atoi(m[1])
+		w, _ := strconv.Atoi(m[2])
+		if w > 0 && h > 0 {
+			cellPxW, cellPxH = w, h
+		}
+	}
+}
+
+var da1Re = regexp.MustCompile(`\x1b\[\?[0-9;]*c`)
+
+func readUntilDA1(fd int, timeout time.Duration) string {
+	var buf []byte
+	tmp := make([]byte, 1024)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) && !da1Re.Match(buf) {
+		var fds unix.FdSet
+		fds.Set(fd)
+		left := time.Until(deadline)
+		tv := unix.NsecToTimeval(left.Nanoseconds())
+		n, err := unix.Select(fd+1, &fds, nil, nil, &tv)
+		if err != nil || n == 0 {
+			continue
+		}
+		r, err := unix.Read(fd, tmp)
+		if err != nil || r <= 0 {
+			break
+		}
+		buf = append(buf, tmp[:r]...)
+	}
+	return string(buf)
+}
+
+// kittyFreeAll deletes every image sup transmitted; run on exit.
+func kittyFreeAll() {
+	if imagesKitty && kittyNextID > 1 {
+		os.Stdout.WriteString("\x1b_Ga=d,d=A,q=2\x1b\\")
+	}
+}
+
+// kittyImageLines lays out img in at most maxCols x maxRows cells and returns
+// the placeholder rows, queueing the transmission the first time.
+func kittyImageLines(key string, img image.Image, maxCols, maxRows int) []string {
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w == 0 || h == 0 {
+		return nil
+	}
+	cols := min(maxCols, max((w+cellPxW-1)/cellPxW, 1))
+	rows := max((h*cols*cellPxW/w+cellPxH-1)/cellPxH, 1)
+	if rows > maxRows {
+		rows = maxRows
+		cols = max(w*rows*cellPxH/(h*cellPxW), 1)
+	}
+
+	id, ok := kittyIDs[fmt.Sprintf("%s\x00%dx%d", key, cols, rows)]
+	if !ok {
+		id = kittyNextID
+		kittyNextID++
+		kittyIDs[fmt.Sprintf("%s\x00%dx%d", key, cols, rows)] = id
+		kittyPending = append(kittyPending, kittyTransmit(id, img, cols, rows))
+	}
+
+	color := fmt.Sprintf("\x1b[38;2;%d;%d;%dm", id>>16&0xff, id>>8&0xff, id&0xff)
+	out := make([]string, rows)
+	for r := 0; r < rows; r++ {
+		var sb strings.Builder
+		sb.WriteString(color)
+		for c := 0; c < cols; c++ {
+			sb.WriteString("\U0010EEEE")
+			sb.WriteRune(kittyDiacritics[r])
+			sb.WriteRune(kittyDiacritics[c])
+		}
+		sb.WriteString("\x1b[0m")
+		out[r] = sb.String()
+	}
+	return out
+}
+
+// kittyTransmit encodes img at the size it will be shown and wraps it in
+// chunked APC commands that create a virtual placement (U=1) of cols x rows.
+func kittyTransmit(id int, img image.Image, cols, rows int) string {
+	tw, th := cols*cellPxW, rows*cellPxH
+	b := img.Bounds()
+	if tw > b.Dx() || th > b.Dy() {
+		tw, th = b.Dx(), b.Dy()
+	}
+	var buf bytes.Buffer
+	enc := png.Encoder{CompressionLevel: png.BestSpeed}
+	if err := enc.Encode(&buf, resample(img, tw, th)); err != nil {
+		return ""
+	}
+	data := base64.StdEncoding.EncodeToString(buf.Bytes())
+
+	const chunk = 4096
+	var sb strings.Builder
+	for i := 0; i < len(data); i += chunk {
+		more := 0
+		if i+chunk < len(data) {
+			more = 1
+		}
+		part := data[i:min(i+chunk, len(data))]
+		if i == 0 {
+			fmt.Fprintf(&sb, "\x1b_Ga=T,U=1,f=100,t=d,i=%d,c=%d,r=%d,q=2,m=%d;%s\x1b\\", id, cols, rows, more, part)
+		} else {
+			fmt.Fprintf(&sb, "\x1b_Gm=%d;%s\x1b\\", more, part)
+		}
+	}
+	return sb.String()
+}
+
+// resample box-filters img down to w x h (never up).
+func resample(img image.Image, w, h int) image.Image {
+	b := img.Bounds()
+	if w >= b.Dx() && h >= b.Dy() {
+		return img
+	}
+	out := image.NewNRGBA(image.Rect(0, 0, w, h))
+	sw, sh := b.Dx(), b.Dy()
+	for y := 0; y < h; y++ {
+		y0, y1 := b.Min.Y+y*sh/h, b.Min.Y+max((y+1)*sh/h, y*sh/h+1)
+		for x := 0; x < w; x++ {
+			x0, x1 := b.Min.X+x*sw/w, b.Min.X+max((x+1)*sw/w, x*sw/w+1)
+			var r, g, bl, a, n uint32
+			// At most 4x4 samples per output pixel keeps huge images fast.
+			sx, sy := max((x1-x0)/4, 1), max((y1-y0)/4, 1)
+			for yy := y0; yy < y1; yy += sy {
+				for xx := x0; xx < x1; xx += sx {
+					cr, cg, cb, ca := img.At(xx, yy).RGBA()
+					r, g, bl, a, n = r+cr, g+cg, bl+cb, a+ca, n+1
+				}
+			}
+			// RGBA() is premultiplied; un-premultiply for NRGBA.
+			i := out.PixOffset(x, y)
+			if a == 0 {
+				continue
+			}
+			out.Pix[i+0] = uint8(r * 255 / a)
+			out.Pix[i+1] = uint8(g * 255 / a)
+			out.Pix[i+2] = uint8(bl * 255 / a)
+			out.Pix[i+3] = uint8(a / n >> 8)
+		}
+	}
+	return out
+}
+
+type kittyFlushedMsg struct{ count int }
+
+// scheduleKittyFlush drops sent transmissions once a frame carrying them has
+// certainly been written (frames flush every ~16ms).
+func scheduleKittyFlush() tea.Cmd {
+	if len(kittyPending) == 0 || kittyFlushScheduled {
+		return nil
+	}
+	kittyFlushScheduled = true
+	n := len(kittyPending)
+	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return kittyFlushedMsg{count: n} })
+}
+
+func handleKittyFlushed(msg kittyFlushedMsg) {
+	kittyPending = kittyPending[min(msg.count, len(kittyPending)):]
+	kittyFlushScheduled = false
+}

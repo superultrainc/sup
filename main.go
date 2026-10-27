@@ -275,34 +275,27 @@ type model struct {
 	refreshing        bool   // true when fetching new data while showing cached data
 	confirmAction     string // non-empty while awaiting y/n confirmation (e.g. "approve")
 	confirmPR         *PR
-	actionPending     bool            // true while a review submission is in flight
-	actionStatus      string          // transient success/error feedback for review actions
-	helpMode          bool            // true while the help overlay is showing
-	visibleCount      int             // for animation
-	spinnerFrame      int             // for loading spinner
-	refreshSeen       map[string]bool // PR keys seen during the in-flight refresh
-	refreshID         int             // increments each refresh; stale page messages are dropped
-	pendingShards     int             // shards still streaming pages for the current refresh
-	statusFilterIndex int             // current index in statusFilters array (-1 means no filter)
-	authorFilter      string          // author filter (e.g., "!username"), empty means no author filter
-	repos             []string        // repo names present in m.prs, sorted; rebuilt on every refresh
-	repoFilterIndex   int             // current index into repos (-1 means no repo filter)
-	detail            *prDetailView   // non-nil while the full PR view is open
+	actionPending     bool              // true while a review submission is in flight
+	actionStatus      string            // transient success/error feedback for review actions
+	helpMode          bool              // true while the help overlay is showing
+	visibleCount      int               // for animation
+	spinnerFrame      int               // for loading spinner
+	refreshID         int               // increments each refresh; stale results are dropped
+	discovered        map[string]prStub // open PRs found by the in-flight refresh
+	pendingDiscover   int               // search shards still discovering
+	discoverFailed    bool              // a shard failed, so don't prune
+	pendingRows       int               // row batches still loading for the current refresh
+	statusFilterIndex int               // current index in statusFilters array (-1 means no filter)
+	authorFilter      string            // author filter (e.g., "!username"), empty means no author filter
+	repos             []string          // repo names present in m.prs, sorted; rebuilt on every refresh
+	repoFilterIndex   int               // current index into repos (-1 means no repo filter)
+	detail            *prDetailView     // non-nil while the full PR view is open
 	cache             map[string]*prCacheEntry
 	hoverSeq          int // invalidates pending prefetch ticks when the cursor moves
 	warmQueue         []PR
 	warmInFlight      int
 	prsDirty          bool // list changed since the last cache write
 	prsSaveScheduled  bool
-}
-
-type prPageLoadedMsg struct {
-	prs       []PR
-	endCursor string
-	hasNext   bool
-	shardIdx  int
-	refreshID int
-	err       error
 }
 
 func prKey(pr PR) string {
@@ -570,116 +563,6 @@ func fetchUserOrgs() ([]string, error) {
 	return result, nil
 }
 
-func searchShards() []string {
-	if mineMode {
-		return []string{"involves:@me is:pr is:open"}
-	}
-	var s []string
-	for _, o := range orgs {
-		s = append(s, "org:"+o+" is:pr is:open")
-	}
-	return s
-}
-
-func fetchShardPage(shardIdx int, after string, refreshID int) tea.Cmd {
-	return func() tea.Msg {
-		if demoMode {
-			return prPageLoadedMsg{prs: mockPRs(), shardIdx: shardIdx, refreshID: refreshID}
-		}
-
-		shards := searchShards()
-		if shardIdx >= len(shards) {
-			return prPageLoadedMsg{shardIdx: shardIdx, refreshID: refreshID}
-		}
-
-		afterArg := "null"
-		if after != "" {
-			afterArg = `"` + after + `"`
-		}
-
-		query := fmt.Sprintf(`{
-			search(query: "%s", type: ISSUE, first: 50, after: %s) {
-				pageInfo { endCursor hasNextPage }
-				nodes {
-					... on PullRequest {
-						number
-						title
-						headRefName
-						headRefOid
-						updatedAt
-						isDraft
-						additions
-						deletions
-						author { login }
-						repository { name owner { login } }
-						reviewDecision
-						reviewRequests(first: 5) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
-						reviews(last: 5) { nodes { author { login } state } }
-					}
-				}
-			}
-		}`, shards[shardIdx], afterArg)
-
-		output, err := graphqlPOST(query)
-		if err != nil {
-			return prPageLoadedMsg{shardIdx: shardIdx, refreshID: refreshID, err: fmt.Errorf("failed to fetch PRs: %w", err)}
-		}
-
-		var resp struct {
-			Data struct {
-				Search struct {
-					PageInfo struct {
-						EndCursor   string `json:"endCursor"`
-						HasNextPage bool   `json:"hasNextPage"`
-					} `json:"pageInfo"`
-					Nodes []PR `json:"nodes"`
-				} `json:"search"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(output, &resp); err != nil {
-			return prPageLoadedMsg{shardIdx: shardIdx, refreshID: refreshID, err: fmt.Errorf("failed to parse PRs: %w", err)}
-		}
-
-		return prPageLoadedMsg{
-			prs:       resp.Data.Search.Nodes,
-			endCursor: resp.Data.Search.PageInfo.EndCursor,
-			hasNext:   resp.Data.Search.PageInfo.HasNextPage,
-			shardIdx:  shardIdx,
-			refreshID: refreshID,
-		}
-	}
-}
-
-// startRefresh resets refresh state on the model and returns the batch of
-// commands that drive the parallel fan-out: one chain per search shard plus
-// one batched-aliases GraphQL request per chunk of already-cached PRs.
-func (m *model) startRefresh() tea.Cmd {
-	m.refreshID++
-	m.refreshSeen = make(map[string]bool)
-	shards := searchShards()
-	if len(shards) == 0 {
-		m.refreshing = false
-		return nil
-	}
-	m.pendingShards = len(shards)
-	cmds := make([]tea.Cmd, 0, len(shards)+4)
-	for i := range shards {
-		cmds = append(cmds, fetchShardPage(i, "", m.refreshID))
-	}
-
-	// Fast path: refresh cached PRs in aliased batches, in parallel, so rows
-	// update as each batch lands. Batches of 10 measured fastest (117 PRs:
-	// ~1.7s vs ~2.4s one-per-PR, and 12 requests instead of 117).
-	if !demoMode {
-		for i := 0; i < len(m.prs); i += prRefreshBatch {
-			cmds = append(cmds, fetchPRBatchCmd(m.prs[i:min(i+prRefreshBatch, len(m.prs))]))
-		}
-	}
-
-	cmds = append(cmds, spinnerTick())
-	return tea.Batch(cmds...)
-}
-
 func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 	return func() tea.Msg {
 		repoSlug := fmt.Sprintf("%s/%s", pr.Repository.Owner.Login, pr.Repository.Name)
@@ -715,13 +598,17 @@ const prRowFields = `number title headRefName headRefOid updatedAt isDraft addit
 const prRefreshBatch = 10
 
 type prsRefreshedMsg struct {
-	prs []PR
-	err error
+	prs       []PR
+	refreshID int // non-zero when part of a list refresh
+	err       error
 }
 
-// fetchPRBatchCmd refreshes several PRs in one GraphQL request using aliases.
-func fetchPRBatchCmd(prs []PR) tea.Cmd {
+// fetchPRBatchCmd fetches full rows for several PRs in one GraphQL request using aliases.
+func fetchPRBatchCmd(prs []PR, refreshID int) tea.Cmd {
 	return func() tea.Msg {
+		if demoMode {
+			return prsRefreshedMsg{prs: demoRows(prs), refreshID: refreshID}
+		}
 		var q strings.Builder
 		q.WriteString("{")
 		for i, p := range prs {
@@ -731,7 +618,7 @@ func fetchPRBatchCmd(prs []PR) tea.Cmd {
 		q.WriteString("}")
 		out, err := graphqlPOST(q.String())
 		if err != nil {
-			return prsRefreshedMsg{err: err}
+			return prsRefreshedMsg{refreshID: refreshID, err: err}
 		}
 		var resp struct {
 			Data map[string]*struct {
@@ -739,7 +626,7 @@ func fetchPRBatchCmd(prs []PR) tea.Cmd {
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(out, &resp); err != nil {
-			return prsRefreshedMsg{err: err}
+			return prsRefreshedMsg{refreshID: refreshID, err: err}
 		}
 		var updated []PR
 		for i, p := range prs {
@@ -752,13 +639,26 @@ func fetchPRBatchCmd(prs []PR) tea.Cmd {
 			u.Repository = p.Repository
 			updated = append(updated, u)
 		}
-		return prsRefreshedMsg{prs: updated}
+		return prsRefreshedMsg{prs: updated, refreshID: refreshID}
 	}
+}
+
+// demoRows returns the mock rows matching prs.
+func demoRows(prs []PR) []PR {
+	var out []PR
+	for _, want := range prs {
+		for _, mock := range mockPRs() {
+			if samePR(mock, want) {
+				out = append(out, mock)
+			}
+		}
+	}
+	return out
 }
 
 func fetchSinglePRCmd(pr PR) tea.Cmd {
 	return func() tea.Msg {
-		msg := fetchPRBatchCmd([]PR{pr})().(prsRefreshedMsg)
+		msg := fetchPRBatchCmd([]PR{pr}, 0)().(prsRefreshedMsg)
 		switch {
 		case msg.err != nil:
 			return prRefreshedMsg{err: msg.err}
@@ -891,71 +791,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case warmDoneMsg:
 		return m, m.handleWarmDone(msg)
 
-	case prPageLoadedMsg:
-		// Stale message from a prior refresh — ignore.
-		if msg.refreshID != m.refreshID {
-			return m, nil
-		}
-		if msg.err != nil {
-			if len(m.prs) == 0 {
-				m.err = msg.err
-			}
-			m.pendingShards--
-			if m.pendingShards <= 0 {
-				m.refreshing = false
-				m.loading = false
-			}
-			return m, nil
-		}
-
-		index := make(map[string]int, len(m.prs))
-		for i := range m.prs {
-			index[prKey(m.prs[i])] = i
-		}
-		for _, np := range msg.prs {
-			key := prKey(np)
-			m.refreshSeen[key] = true
-			if i, ok := index[key]; ok {
-				m.prs[i] = np
-			} else {
-				index[key] = len(m.prs)
-				m.prs = append(m.prs, np)
-			}
-		}
-
-		// If this shard has more pages, fire the next page now (don't wait for
-		// other shards). Otherwise this shard is done.
-		var next tea.Cmd
-		if msg.hasNext {
-			next = fetchShardPage(msg.shardIdx, msg.endCursor, msg.refreshID)
-		} else {
-			m.pendingShards--
-		}
-
-		// When every shard has finished, prune PRs not seen this refresh and persist.
-		if m.pendingShards <= 0 && !msg.hasNext {
-			kept := m.prs[:0]
-			for _, pr := range m.prs {
-				if m.refreshSeen[prKey(pr)] {
-					kept = append(kept, pr)
-				}
-			}
-			m.prs = kept
-			m.refreshing = false
-		}
-
-		sortPRsByOldestFirst(m.prs)
-		m.syncRepoList()
-		m.applyFilterKeepingCursor()
-
-		m.loading = false
-		m.visibleCount = len(m.filtered)
-
-		// Fresh updatedAt/head values: re-warm anything that changed.
-		if !m.refreshing {
-			return m, tea.Batch(next, m.enqueueWarm(), m.markPRsDirty())
-		}
-		return m, next
+	case discoveredMsg:
+		return m, m.handleDiscovered(msg)
 
 	case savePRsMsg:
 		m.prsSaveScheduled = false
@@ -1037,10 +874,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.applyRefreshedPRs([]PR{msg.pr})
 
 	case prsRefreshedMsg:
-		if msg.err != nil {
-			return m, nil
-		}
-		return m, m.applyRefreshedPRs(msg.prs)
+		return m, m.handleRowsRefreshed(msg)
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -1219,20 +1053,33 @@ func (m *model) applyFilter() {
 
 // applyFilterKeepingCursor re-filters after data changes without moving the selection.
 // applyRefreshedPRs swaps updated rows in, re-filtering once per batch.
+// applyRefreshedPRs swaps updated rows in (adding new PRs), re-filtering once per batch.
 func (m *model) applyRefreshedPRs(updated []PR) tea.Cmd {
+	added := false
 	for _, u := range updated {
+		found := false
 		for i := range m.prs {
 			if samePR(m.prs[i], u) {
 				m.prs[i] = u
+				found = true
 				break
 			}
+		}
+		if !found {
+			m.prs = append(m.prs, u)
+			added = true
 		}
 		if m.detail != nil && samePR(m.detail.pr, u) {
 			m.detail.pr = u
 		}
 	}
+	if added {
+		sortPRsByOldestFirst(m.prs)
+		m.syncRepoList()
+	}
 	// Every active filter (repo, status, author) must survive the rebuild, not just typed text.
 	m.applyFilterKeepingCursor()
+	m.visibleCount = len(m.filtered)
 	return m.markPRsDirty()
 }
 

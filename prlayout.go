@@ -208,7 +208,11 @@ func (m model) paneRows(height int) []string {
 	v := m.detail
 	p := v.pane()
 	end := min(p.scroll+height, len(p.lines))
-	visible := p.lines[p.scroll:end]
+	visible := append([]string(nil), p.lines[p.scroll:end]...)
+	// Pane lines start with a one-space margin; the current search match takes it over.
+	if ml := v.currentMatchLine() - p.scroll; ml >= 0 && ml < len(visible) && strings.HasPrefix(visible[ml], " ") {
+		visible[ml] = sty(currentDiffTheme().accent, "", true, false).Render("▶") + visible[ml][1:]
+	}
 
 	var side []string
 	sideW := 0
@@ -251,6 +255,8 @@ func (m model) detailFooter() string {
 		status = filterStyle.Render(fmt.Sprintf(" Approve PR #%d? (y/n)", m.confirmPR.Number))
 	case m.actionPending:
 		status = reviewRequestedStyle.Render(" " + spinnerFrames[m.spinnerFrame] + " Submitting review...")
+	case v.search != nil:
+		status = v.searchStatus()
 	case m.actionStatus != "":
 		style := approvedStyle
 		if strings.HasPrefix(m.actionStatus, "Error") || strings.Contains(m.actionStatus, "cancelled") {
@@ -265,18 +271,20 @@ func (m model) detailFooter() string {
 
 	pct := "all"
 	if ms := v.maxScroll(m.height); ms > 0 {
-		pct = fmt.Sprintf("%d%%", v.pane().scroll*100/ms)
+		pct = fmt.Sprintf("%d%%", min(v.pane().scroll*100/ms, 100))
 	}
 	var help string
 	switch {
+	case v.search != nil && v.search.typing:
+		help = " type to search · enter keep · esc cancel"
 	case v.picker != nil:
 		help = " ↑/↓ move · space toggle · type to filter · enter save · esc cancel"
 	case v.merge != nil:
 		help = " ↑/↓ method · b delete branch · a auto-merge · enter merge · esc cancel"
 	case v.tab == tabFiles:
-		help = " j/k scroll · [/] file · n/N comment · s layout · w wrap · x collapse · tab next tab · esc back"
+		help = " j/k scroll · / search · [/] file · n/N comment · s layout · w wrap · x collapse · tab next tab · esc back"
 	default:
-		help = " j/k scroll · [/] next item · tab next tab · m merge · r reviewers · A approve · D changes · M comment · o open · esc back"
+		help = " j/k scroll · / search · [/] next item · tab next tab · m merge · r reviewers · A approve · D changes · M comment · o open · esc back"
 	}
 	return status + "\n" + helpStyle.Render(truncateToWidth(help+"  "+pct, max(m.width-1, 20)))
 }

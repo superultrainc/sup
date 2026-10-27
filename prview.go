@@ -325,6 +325,7 @@ type prDetailView struct {
 	width       int
 	picker      *reviewerPicker // non-nil while the reviewer picker is open
 	merge       *mergeDialog    // non-nil while the merge dialog is open
+	search      *detailSearch   // non-nil while a `/` search is being typed or is active
 }
 
 func newDetailView(pr PR) *prDetailView {
@@ -420,6 +421,7 @@ func (v *prDetailView) rebuild(width int) {
 	v.rebuildCommits()
 	v.rebuildChecks()
 	v.rebuildFiles()
+	v.refreshSearch()
 }
 
 // currentFile is the index of the file at the top of the files pane, or -1.
@@ -440,6 +442,7 @@ func (v *prDetailView) rebuildFilesKeepingPlace() {
 	if p := &v.panes[tabFiles]; cur >= 0 && cur < len(p.marks) {
 		p.scroll = p.marks[cur]
 	}
+	v.refreshSearch()
 }
 
 func (v *prDetailView) rebuildFiles() {
@@ -464,6 +467,9 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.detail.merge != nil {
 		return m.handleMergeInput(msg)
 	}
+	if s := m.detail.search; s != nil && s.typing {
+		return m.handleSearchInput(msg)
+	}
 	if m.confirmAction != "" {
 		return m.handleNormalInput(msg)
 	}
@@ -472,15 +478,26 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	page := v.bodyHeight(m.height)
 	switch key := msg.String(); key {
 	case "esc", "q", "backspace", "left":
+		// An active search clears first; only then does esc leave the view.
+		if v.search != nil && key == "esc" {
+			v.search = nil
+			return m, nil
+		}
 		m.detail = nil
 		m.actionStatus = ""
 		return m, nil
+	case "/":
+		v.search = &detailSearch{typing: true, origin: p.scroll, current: -1}
+		return m, nil
 	case "tab":
 		v.tab = (v.tab + 1) % tabCount
+		v.refreshSearch()
 	case "shift+tab":
 		v.tab = (v.tab + tabCount - 1) % tabCount
+		v.refreshSearch()
 	case "1", "2", "3", "4":
 		v.tab = int(key[0] - '1')
+		v.refreshSearch()
 	case "j", "down":
 		p.scroll++
 	case "k", "up":
@@ -501,13 +518,18 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		jumpMark(p, p.marks, 1)
 	case "[":
 		jumpMark(p, p.marks, -1)
-	case "n":
-		if v.tab == tabFiles {
-			jumpMark(p, v.threadMarks, 1)
+	case "n", "N":
+		dir := 1
+		if key == "N" {
+			dir = -1
 		}
-	case "N":
-		if v.tab == tabFiles {
-			jumpMark(p, v.threadMarks, -1)
+		// n/N follow search matches when a search is active, else review threads.
+		switch {
+		case v.search != nil:
+			v.stepMatch(dir, m.height)
+			return m, nil
+		case v.tab == tabFiles:
+			jumpMark(p, v.threadMarks, dir)
 		}
 	case "s":
 		if v.tab == tabFiles {

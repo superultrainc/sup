@@ -98,8 +98,9 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | Key | Action |
 |-----|--------|
 | `j` / `k`, `ctrl+d` / `ctrl+u`, `space` | Scroll |
+| `/` | Search the current tab (`enter` keeps it, `esc` cancels or clears) |
 | `[` / `]` | Previous / next item (Conversation, Commits) or file (Files) |
-| `n` / `N` | Next / previous review thread (Files) |
+| `n` / `N` | Next / previous search match; without a search, next / previous review thread (Files) |
 | `s` | Cycle layout: auto → split → unified |
 | `w` | Toggle line wrapping |
 | `x` | Collapse / expand the current file |

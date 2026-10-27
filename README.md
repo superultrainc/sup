@@ -77,7 +77,7 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `o` | Open PR in browser |
 | `O` | Open all PRs needing review in browser |
 | `c` | Copy PR link to clipboard |
-| `v` | Full PR view: description, checks, files, reviewers, comments, reviews, and review threads |
+| `v` | Full PR view: conversation (description, checks, reviews, comments) and a syntax-highlighted diff with review threads inline |
 | `d` | Review PR diff with [hunk](https://github.com/modem-dev/hunk), with GitHub review comments inline (split by default; press `1`/`2`/`0` inside hunk to flip layout, `a` to toggle comments) |
 | `A` | Approve PR (with `y`/`n` confirm) |
 | `D` | Request changes — opens `$EDITOR` for body |
@@ -88,7 +88,23 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 
 ### PR view
 
-`v` opens a full-screen view of the selected PR. `j`/`k` scroll, `[`/`]` jump between sections, `R` reloads, and `esc` goes back. `d`, `A`, `D`, `M`, `o`, and `c` work from here too.
+`v` opens a full-screen view of the selected PR with two tabs (`tab`, or `1`/`2`):
+
+- **Conversation**: description, checks, and a timeline of comments, reviews, and review threads.
+- **Files changed**: syntax-highlighted diff with word-level change highlights and review threads inline under their lines. Lockfiles and very large diffs start collapsed.
+
+| Key | Action |
+|-----|--------|
+| `j` / `k`, `ctrl+d` / `ctrl+u`, `space` | Scroll |
+| `[` / `]` | Previous / next item (Conversation) or file (Files) |
+| `n` / `N` | Next / previous review thread (Files) |
+| `s` | Cycle layout: auto → split → unified |
+| `w` | Toggle line wrapping |
+| `x` | Collapse / expand the current file |
+| `R` | Reload |
+| `esc` | Back to the list |
+
+`d`, `A`, `D`, `M`, `o`, and `c` work from here too.
 
 ## Configuration (optional)
 

@@ -226,10 +226,13 @@ type PR struct {
 	HeadRefName string    `json:"headRefName"`
 	HeadRefOid  string    `json:"headRefOid"`
 	UpdatedAt   time.Time `json:"updatedAt"`
-	IsDraft     bool      `json:"isDraft"`
-	Additions   int       `json:"additions"`
-	Deletions   int       `json:"deletions"`
-	Author      struct {
+	// Partial rows came from discovery and are still missing stats and review
+	// state. It's persisted so a quit mid-refresh still refetches them.
+	Partial   bool `json:"partial,omitempty"`
+	IsDraft   bool `json:"isDraft"`
+	Additions int  `json:"additions"`
+	Deletions int  `json:"deletions"`
+	Author    struct {
 		Login string `json:"login"`
 	} `json:"author"`
 	Repository struct {
@@ -285,6 +288,7 @@ type model struct {
 	pendingDiscover   int               // search shards still discovering
 	discoverFailed    bool              // a shard failed, so don't prune
 	pendingRows       int               // row batches still loading for the current refresh
+	lastRefresh       time.Time         // when the list was last fully refreshed
 	statusFilterIndex int               // current index in statusFilters array (-1 means no filter)
 	authorFilter      string            // author filter (e.g., "!username"), empty means no author filter
 	repos             []string          // repo names present in m.prs, sorted; rebuilt on every refresh
@@ -550,6 +554,11 @@ func fetchUserOrgs() ([]string, error) {
 	return orgs, nil
 }
 
+func reviewDoneText(action string, pr PR) string {
+	verb := map[string]string{"approve": "Approved", "request-changes": "Requested changes on", "comment": "Commented on"}[action]
+	return fmt.Sprintf("✓ %s PR #%d", verb, pr.Number)
+}
+
 var reviewEvents = map[string]string{"approve": "APPROVE", "request-changes": "REQUEST_CHANGES", "comment": "COMMENT"}
 
 func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
@@ -689,7 +698,7 @@ func refreshMetaCmd() tea.Msg {
 type startRefreshMsg struct{}
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(func() tea.Msg { return startRefreshMsg{} }, refreshMetaCmd)
+	return tea.Batch(func() tea.Msg { return startRefreshMsg{} }, refreshMetaCmd, clockTick())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -786,7 +795,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		if m.loading || m.refreshing || m.actionPending || (m.detail != nil && (m.detail.loading || m.detail.diffLoading ||
+		// Spin only while something is missing; background refreshes stay quiet.
+		if m.loading || m.actionPending || (m.detail != nil && ((m.detail.loading && m.detail.detail == nil) || (m.detail.diffLoading && m.detail.diff == nil) ||
 			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)) ||
 			(m.detail.merge != nil && m.detail.merge.saving))) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
@@ -803,30 +813,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.actionStatus = fmt.Sprintf("%s cancelled (empty body)", msg.action)
 			return m, nil
 		}
-		m.actionPending = true
-		return m, tea.Batch(submitReviewCmd(msg.action, msg.pr, msg.body), spinnerTick())
+		m.actionStatus = reviewDoneText(msg.action, msg.pr)
+		return m, submitReviewCmd(msg.action, msg.pr, msg.body)
 
 	case reviewSubmittedMsg:
-		m.actionPending = false
 		if msg.err != nil {
 			m.actionStatus = "Error: " + msg.err.Error()
 			return m, nil
 		}
-		var verb string
-		switch msg.action {
-		case "approve":
-			verb = "Approved"
-		case "request-changes":
-			verb = "Requested changes on"
-		case "comment":
-			verb = "Commented on"
-		}
-		m.actionStatus = fmt.Sprintf("✓ %s PR #%d", verb, msg.pr.Number)
 		// Refresh just this PR so its badge reflects the new review state.
 		cmds := []tea.Cmd{fetchSinglePRCmd(msg.pr)}
 		if m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr) {
-			m.detail.loading = true
-			cmds = append(cmds, fetchPRDetailCmd(msg.pr), spinnerTick())
+			cmds = append(cmds, fetchPRDetailCmd(msg.pr))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -848,6 +846,25 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case prsRefreshedMsg:
 		return m, m.handleRowsRefreshed(msg)
+
+	case autoRefreshMsg:
+		// Only if nothing refreshed since this timer was set.
+		if msg.refreshID == m.refreshID && !m.refreshing {
+			m.refreshing = true
+			return m, m.startRefresh()
+		}
+		return m, nil
+
+	case tea.FocusMsg:
+		if !m.refreshing && time.Since(m.lastRefresh) > focusRefreshAfter {
+			m.refreshing = true
+			return m, m.startRefresh()
+		}
+		return m, nil
+
+	case clockTickMsg:
+		// Keeps "updated Xm ago" honest while idle.
+		return m, clockTick()
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -1162,9 +1179,9 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			pr := *m.confirmPR
 			m.confirmAction = ""
 			m.confirmPR = nil
-			m.actionPending = true
-			m.actionStatus = ""
-			return m, tea.Batch(submitReviewCmd(action, pr, ""), spinnerTick())
+			// Optimistic: confirm now; an error replaces this if GitHub rejects it.
+			m.actionStatus = reviewDoneText(action, pr)
+			return m, submitReviewCmd(action, pr, "")
 		default:
 			m.confirmAction = ""
 			m.confirmPR = nil
@@ -1373,12 +1390,18 @@ func (m *model) cycleStatusFilter() {
 
 // Status kinds index the badge painters; order matches statusKind.
 var (
-	badgeLabels    = [6]string{"[Draft]", "[Approved]", "[Denied]", "[Commented]", "[Review]", "[Open]"}
-	badgeColors    = [6]string{"241", "78", "196", "117", "214", "39"}
-	badgeSelColors = [6]string{"250", "114", "203", "159", "221", "81"}
+	badgeLabels    = [7]string{"[Draft]", "[Approved]", "[Denied]", "[Commented]", "[Review]", "[Open]", "[…]"}
+	badgeColors    = [7]string{"241", "78", "196", "117", "214", "39", "238"}
+	badgeSelColors = [7]string{"250", "114", "203", "159", "221", "81", "244"}
 )
 
+// statusPending is a row discovered but not yet loaded; its review state is unknown.
+const statusPending = 6
+
 func statusKind(pr PR) int {
+	if pr.Partial {
+		return statusPending
+	}
 	if pr.IsDraft {
 		return 0
 	}
@@ -1693,8 +1716,12 @@ func (m model) view() string {
 			branch, branchW := padW(truncate(pr.HeadRefName, colBranch-1), colBranch)
 			leftDiff := (colDiff - 1) / 2
 			rightDiff := colDiff - 1 - leftDiff
-			addsPadded, addsW := padLeftW("+"+strconv.Itoa(pr.Additions), leftDiff)
-			delsPadded, delsW := padLeftW("-"+strconv.Itoa(pr.Deletions), rightDiff)
+			addsText, delsText := "+"+strconv.Itoa(pr.Additions), "-"+strconv.Itoa(pr.Deletions)
+			if pr.Partial {
+				addsText, delsText = "", ""
+			}
+			addsPadded, addsW := padLeftW(addsText, leftDiff)
+			delsPadded, delsW := padLeftW(delsText, rightDiff)
 			statusW := displayWidth(label)
 			if statusW < colStatus {
 				statusW = colStatus
@@ -1744,9 +1771,8 @@ func (m model) view() string {
 		}
 		if m.confirmAction == "approve" && m.confirmPR != nil {
 			s.WriteString(lp.filter.Render(fmt.Sprintf("  Approve PR #%d? (y/n)", m.confirmPR.Number)))
-		} else if m.refreshing {
-			spinner := spinnerFrames[m.spinnerFrame]
-			s.WriteString(lp.loading.Render("  " + spinner + " Refreshing"))
+		} else if status := m.freshness(); status != "" {
+			s.WriteString(lp.dim.Render("  " + status))
 		}
 	}
 
@@ -1763,7 +1789,7 @@ type listPainters struct {
 	caret, selNormal, selAuthor, selReviewer painter
 	selBranch, selAdds, selDels              painter
 	normal, reviewer, branch, adds, dels     painter
-	badge, selBadge                          [6]painter
+	badge, selBadge                          [7]painter
 }
 
 func newListPainters() listPainters {
@@ -1970,7 +1996,7 @@ func main() {
 	go pruneImageCache()
 	detectImageMode()
 
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	finalModel, err := p.Run()
 	kittyFreeAll()
 	if fm, ok := finalModel.(model); ok && fm.prsDirty {

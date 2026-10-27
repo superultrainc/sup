@@ -265,8 +265,6 @@ func (m model) detailFooter() string {
 		status = style.Render(" " + m.actionStatus)
 	case v.err != nil && v.detail != nil:
 		status = changesRequestedStyle.Render(" Reload failed: " + v.err.Error())
-	case (v.loading && v.detail != nil) || (v.diffLoading && v.diff != nil):
-		status = reviewRequestedStyle.Render(" " + spinnerFrames[m.spinnerFrame] + " Refreshing...")
 	}
 
 	pct := "all"

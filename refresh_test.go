@@ -32,8 +32,12 @@ func TestRefreshFetchesOnlyChangedRows(t *testing.T) {
 	m.startRefresh()
 	cmd := m.handleDiscovered(discoveredMsg{refreshID: m.refreshID, stubs: discovered})
 
-	if got := numbers(m.prs); len(got) != 3 {
-		t.Fatalf("closed PR #3 should be pruned, got %v", got)
+	// Closed #3 is pruned and new #9 shows up immediately, as a partial row.
+	if got := numbers(m.prs); len(got) != 4 || got[3] != 9 {
+		t.Fatalf("want [1 2 4 9], got %v", got)
+	}
+	if !m.prs[3].Partial || statusKind(m.prs[3]) != statusPending {
+		t.Fatalf("new PR should render as pending until its row loads")
 	}
 	if m.pendingRows != 1 || cmd == nil {
 		t.Fatalf("want one row batch for the two changed PRs, got %d", m.pendingRows)
@@ -42,11 +46,11 @@ func TestRefreshFetchesOnlyChangedRows(t *testing.T) {
 	updated := m.prs[1]
 	updated.Title, updated.UpdatedAt = "updated", now.Add(time.Minute)
 	m.handleRowsRefreshed(prsRefreshedMsg{refreshID: m.refreshID, prs: []PR{updated, newPR}})
-	if m.refreshing || m.pendingRows != 0 {
+	if m.refreshing || m.pendingRows != 0 || m.lastRefresh.IsZero() {
 		t.Fatalf("refresh should finish after the last batch")
 	}
-	if got := numbers(m.prs); len(got) != 4 || got[len(got)-1] != 9 {
-		t.Fatalf("new PR #9 should be added in order, got %v", got)
+	if m.prs[3].Partial || m.prs[1].Title != "updated" {
+		t.Fatalf("rows should be filled in: %+v", m.prs)
 	}
 }
 

@@ -10,17 +10,23 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// Refresh runs in two steps. Discovery lists every open PR with light fields
-// (number, updatedAt, head); GitHub search is slow when it also resolves
-// reviews per PR (~7s vs ~1.5s for 114 PRs). Then full rows are fetched in
-// aliased batches, only for PRs that are new or whose updatedAt changed.
+// Refresh runs in two steps. Discovery lists every open PR with cheap fields;
+// GitHub search slows down 2-4x once it also computes diff stats or review
+// state (~1.3s vs 3-6s for 114 PRs). New PRs show up from discovery right
+// away as partial rows; full rows are then fetched in aliased batches, only
+// for PRs that are new, partial, or whose updatedAt changed.
 
-// prStub is what discovery needs to tell whether a cached row is current.
+// prStub is what discovery returns: enough to show a row and tell whether a
+// cached one is current.
 type prStub struct {
-	Number     int       `json:"number"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	HeadRefOid string    `json:"headRefOid"`
-	Repository struct {
+	Number      int       `json:"number"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	HeadRefOid  string    `json:"headRefOid"`
+	Title       string    `json:"title"`
+	HeadRefName string    `json:"headRefName"`
+	IsDraft     bool      `json:"isDraft"`
+	Author      ghActor   `json:"author"`
+	Repository  struct {
 		Name  string `json:"name"`
 		Owner struct {
 			Login string `json:"login"`
@@ -31,6 +37,7 @@ type prStub struct {
 func (s prStub) asPR() PR {
 	var pr PR
 	pr.Number, pr.UpdatedAt, pr.HeadRefOid = s.Number, s.UpdatedAt, s.HeadRefOid
+	pr.Title, pr.HeadRefName, pr.IsDraft, pr.Author.Login = s.Title, s.HeadRefName, s.IsDraft, s.Author.Login
 	pr.Repository.Name, pr.Repository.Owner.Login = s.Repository.Name, s.Repository.Owner.Login
 	return pr
 }
@@ -68,7 +75,7 @@ func fetchSearchPage(query, after string) (searchPage, error) {
 	}
 	out, err := graphqlPOST(fmt.Sprintf(`{ search(query: %q, type: ISSUE, first: %d, after: %s) {
 		issueCount pageInfo { endCursor hasNextPage }
-		nodes { ... on PullRequest { number updatedAt headRefOid repository { name owner { login } } } } } }`,
+		nodes { ... on PullRequest { number updatedAt headRefOid title headRefName isDraft author { login } repository { name owner { login } } } } } }`,
 		query, searchPageSize, afterArg))
 	if err != nil {
 		return searchPage{}, fmt.Errorf("failed to fetch PRs: %w", err)
@@ -162,8 +169,9 @@ func (m *model) startRefresh() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// handleDiscovered collects shard results; once all are in, it drops closed
-// PRs and fetches rows only for new or updated ones.
+// handleDiscovered applies each shard as it lands: new PRs appear at once as
+// partial rows and changed ones are queued for full rows. Closed PRs are
+// pruned only once every shard is in.
 func (m *model) handleDiscovered(msg discoveredMsg) tea.Cmd {
 	if msg.refreshID != m.refreshID {
 		return nil
@@ -175,48 +183,63 @@ func (m *model) handleDiscovered(msg discoveredMsg) tea.Cmd {
 		}
 		m.discoverFailed = true
 	}
-	for _, s := range msg.stubs {
-		m.discovered[prKey(s.asPR())] = s
-	}
-	if m.pendingDiscover > 0 {
-		return nil
-	}
-	if m.discoverFailed {
-		// A partial list can't tell closed PRs from missing ones; keep what we have.
-		m.refreshing, m.loading = false, false
-		return nil
-	}
 
-	have := make(map[string]PR, len(m.prs))
-	kept := m.prs[:0]
-	for _, pr := range m.prs {
-		if _, open := m.discovered[prKey(pr)]; open {
-			kept = append(kept, pr)
-			have[prKey(pr)] = pr
-		}
+	index := make(map[string]int, len(m.prs))
+	for i := range m.prs {
+		index[prKey(m.prs[i])] = i
 	}
-	m.prs = kept
-
 	var need []PR
-	for key, s := range m.discovered {
-		if pr, ok := have[key]; !ok || !pr.UpdatedAt.Equal(s.UpdatedAt) || pr.HeadRefOid != s.HeadRefOid {
+	added := false
+	for _, s := range msg.stubs {
+		key := prKey(s.asPR())
+		m.discovered[key] = s
+		i, ok := index[key]
+		if !ok {
+			pr := s.asPR()
+			pr.Partial = true
+			index[key] = len(m.prs)
+			m.prs = append(m.prs, pr)
+			need = append(need, pr)
+			added = true
+			continue
+		}
+		pr := &m.prs[i]
+		if pr.Partial || !pr.UpdatedAt.Equal(s.UpdatedAt) || pr.HeadRefOid != s.HeadRefOid {
+			// Show the new title/branch now; stats and review state follow.
+			pr.Title, pr.HeadRefName, pr.IsDraft = s.Title, s.HeadRefName, s.IsDraft
 			need = append(need, s.asPR())
 		}
 	}
-	// Newest first, so the PRs most likely to have changed land first.
-	sort.Slice(need, func(i, j int) bool { return need[i].Number > need[j].Number })
 
+	if m.pendingDiscover == 0 && !m.discoverFailed {
+		kept := m.prs[:0]
+		for _, pr := range m.prs {
+			if _, open := m.discovered[prKey(pr)]; open {
+				kept = append(kept, pr)
+			}
+		}
+		m.prs = kept
+	}
+	if added {
+		sortPRsByOldestFirst(m.prs)
+	}
 	m.syncRepoList()
 	m.applyFilterKeepingCursor()
 	m.visibleCount = len(m.filtered)
-	if len(need) == 0 {
-		return m.finishRefresh()
+	if len(m.prs) > 0 {
+		m.loading = false
 	}
-	cmds := make([]tea.Cmd, 0, len(need)/prRefreshBatch+1)
+
+	// Newest first, so the PRs most likely to have changed land first.
+	sort.Slice(need, func(i, j int) bool { return need[i].Number > need[j].Number })
+	var cmds []tea.Cmd
 	for i := 0; i < len(need); i += prRefreshBatch {
 		cmds = append(cmds, fetchPRBatchCmd(need[i:min(i+prRefreshBatch, len(need))], m.refreshID))
 	}
-	m.pendingRows = len(cmds)
+	m.pendingRows += len(cmds)
+	if m.pendingDiscover == 0 && m.pendingRows == 0 {
+		cmds = append(cmds, m.finishRefresh())
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -228,7 +251,7 @@ func (m *model) handleRowsRefreshed(msg prsRefreshedMsg) tea.Cmd {
 	}
 	if msg.refreshID != 0 && msg.refreshID == m.refreshID {
 		m.loading = false
-		if m.pendingRows--; m.pendingRows <= 0 {
+		if m.pendingRows--; m.pendingRows <= 0 && m.pendingDiscover == 0 {
 			cmds = append(cmds, m.finishRefresh())
 		}
 	}
@@ -237,6 +260,39 @@ func (m *model) handleRowsRefreshed(msg prsRefreshedMsg) tea.Cmd {
 
 func (m *model) finishRefresh() tea.Cmd {
 	m.refreshing, m.loading = false, false
+	id := m.refreshID
+	// Keep the list current while sup stays open, so it's fresh whenever you look.
+	next := tea.Tick(autoRefreshEvery, func(time.Time) tea.Msg { return autoRefreshMsg{refreshID: id} })
+	if m.discoverFailed {
+		return next // not up to date; just try again later
+	}
+	m.lastRefresh = time.Now()
 	// Fresh updatedAt/head values: re-warm anything that changed.
-	return tea.Batch(m.enqueueWarm(), m.markPRsDirty())
+	return tea.Batch(m.enqueueWarm(), m.markPRsDirty(), next)
+}
+
+const (
+	autoRefreshEvery  = 2 * time.Minute
+	focusRefreshAfter = 30 * time.Second
+)
+
+type autoRefreshMsg struct{ refreshID int }
+
+type clockTickMsg struct{}
+
+func clockTick() tea.Cmd {
+	return tea.Tick(30*time.Second, func(time.Time) tea.Msg { return clockTickMsg{} })
+}
+
+// freshness is the footer's quiet refresh status.
+func (m model) freshness() string {
+	switch {
+	case m.refreshing:
+		return "↻ updating"
+	case m.lastRefresh.IsZero():
+		return ""
+	case time.Since(m.lastRefresh) < time.Minute:
+		return "✓ up to date"
+	}
+	return "updated " + relTime(m.lastRefresh)
 }

@@ -40,6 +40,7 @@ func TestClickTabs(t *testing.T) {
 func TestClickFileTree(t *testing.T) {
 	m := detailModel(170, 40)
 	m.detail.tab = tabFiles
+	m.detail.ensure() // Update does this after every message
 	_, fileAt := fileTree(m.detail.diff, m.detail.currentFile(), m.detail.detail, m.detail.treeWidth(), m.detail.bodyHeight(m.height))
 	for row, file := range fileAt {
 		if file < 0 {
@@ -49,5 +50,18 @@ func TestClickFileTree(t *testing.T) {
 		if got := next.(model).detail.currentFile(); got != file {
 			t.Errorf("clicking tree row %d should show file %d, got %d", row, file, got)
 		}
+	}
+}
+
+// The diff pane renders only when the Files tab is shown, and switching to it builds it.
+func TestFilesPaneIsLazy(t *testing.T) {
+	m := detailModel(170, 40)
+	if len(m.detail.panes[tabFiles].lines) != 0 || !m.detail.dirty[tabFiles] {
+		t.Fatalf("diff pane should not render while on Conversation")
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	v := next.(model).detail
+	if v.tab != tabFiles || v.dirty[tabFiles] || len(v.panes[tabFiles].lines) == 0 {
+		t.Fatalf("switching to Files should render the diff pane")
 	}
 }

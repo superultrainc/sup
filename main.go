@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,15 +25,18 @@ var (
 	currentUser string   // Authenticated GitHub username
 	ghToken     string   // Cached `gh auth token` for direct HTTP calls
 
-	httpClient = &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:        20,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     90 * time.Second,
-		},
-	}
+	httpClient = &http.Client{Timeout: 30 * time.Second, Transport: newTransport()}
 )
+
+// newTransport starts from the default transport so HTTP/2 stays on: parallel
+// GitHub requests then share one TLS connection instead of a handshake each.
+func newTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 20
+	t.MaxIdleConnsPerHost = 20
+	t.IdleConnTimeout = 90 * time.Second
+	return t
+}
 
 func tokenCachePath() string { return filepath.Join(cacheDir(), "token") }
 
@@ -183,22 +187,48 @@ func loadCachedPRs() []PR {
 	return prs
 }
 
+// savePRsToCache writes atomically so quitting mid-write can't truncate the cache.
 func savePRsToCache(prs []PR) {
 	data, err := json.Marshal(prs)
 	if err != nil {
 		return
 	}
-	os.WriteFile(getCacheFilePath(), data, 0644)
+	path := getCacheFilePath()
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, data, 0644) == nil {
+		os.Rename(tmp, path)
+	}
+}
+
+type savePRsMsg struct{}
+
+// markPRsDirty coalesces cache writes: a refresh delivers ~one response per PR,
+// so the list is saved once the burst settles instead of per response.
+func (m *model) markPRsDirty() tea.Cmd {
+	if demoMode {
+		return nil
+	}
+	m.prsDirty = true
+	if m.prsSaveScheduled {
+		return nil
+	}
+	m.prsSaveScheduled = true
+	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return savePRsMsg{} })
+}
+
+func samePR(a, b PR) bool {
+	return a.Number == b.Number && a.Repository.Name == b.Repository.Name && a.Repository.Owner.Login == b.Repository.Owner.Login
 }
 
 type PR struct {
-	Number      int    `json:"number"`
-	Title       string `json:"title"`
-	HeadRefName string `json:"headRefName"`
-	HeadRefOid  string `json:"headRefOid"`
-	IsDraft     bool   `json:"isDraft"`
-	Additions   int    `json:"additions"`
-	Deletions   int    `json:"deletions"`
+	Number      int       `json:"number"`
+	Title       string    `json:"title"`
+	HeadRefName string    `json:"headRefName"`
+	HeadRefOid  string    `json:"headRefOid"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	IsDraft     bool      `json:"isDraft"`
+	Additions   int       `json:"additions"`
+	Deletions   int       `json:"deletions"`
 	Author      struct {
 		Login string `json:"login"`
 	} `json:"author"`
@@ -260,6 +290,10 @@ type model struct {
 	detail            *prDetailView   // non-nil while the full PR view is open
 	cache             map[string]*prCacheEntry
 	hoverSeq          int // invalidates pending prefetch ticks when the cursor moves
+	warmQueue         []PR
+	warmInFlight      int
+	prsDirty          bool // list changed since the last cache write
+	prsSaveScheduled  bool
 }
 
 type prPageLoadedMsg struct {
@@ -572,6 +606,7 @@ func fetchShardPage(shardIdx int, after string, refreshID int) tea.Cmd {
 						title
 						headRefName
 						headRefOid
+						updatedAt
 						isDraft
 						additions
 						deletions
@@ -632,12 +667,12 @@ func (m *model) startRefresh() tea.Cmd {
 		cmds = append(cmds, fetchShardPage(i, "", m.refreshID))
 	}
 
-	// Fast path: fire one request per cached PR. tea.Batch runs them as
-	// concurrent goroutines, so each row updates the moment its response
-	// arrives (HTTP/2 multiplexes them over a single connection).
+	// Fast path: refresh cached PRs in aliased batches, in parallel, so rows
+	// update as each batch lands. Batches of 10 measured fastest (117 PRs:
+	// ~1.7s vs ~2.4s one-per-PR, and 12 requests instead of 117).
 	if !demoMode {
-		for _, p := range m.prs {
-			cmds = append(cmds, fetchSinglePRCmd(p))
+		for i := 0; i < len(m.prs); i += prRefreshBatch {
+			cmds = append(cmds, fetchPRBatchCmd(m.prs[i:min(i+prRefreshBatch, len(m.prs))]))
 		}
 	}
 
@@ -671,43 +706,66 @@ func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 	}
 }
 
-func fetchSinglePRCmd(pr PR) tea.Cmd {
-	return func() tea.Msg {
-		query := fmt.Sprintf(`{
-			repository(owner: "%s", name: "%s") {
-				pullRequest(number: %d) {
-					number
-					title
-					headRefName
-					headRefOid
-					isDraft
-					additions
-					deletions
-					author { login }
-					reviewDecision
-					reviewRequests(first: 5) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
-					reviews(last: 5) { nodes { author { login } state } }
-				}
-			}
-		}`, pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
+// prRowFields are the PR fields a list row needs.
+const prRowFields = `number title headRefName headRefOid updatedAt isDraft additions deletions
+	author { login } reviewDecision
+	reviewRequests(first: 5) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
+	reviews(last: 5) { nodes { author { login } state } }`
 
-		out, err := graphqlPOST(query)
+const prRefreshBatch = 10
+
+type prsRefreshedMsg struct {
+	prs []PR
+	err error
+}
+
+// fetchPRBatchCmd refreshes several PRs in one GraphQL request using aliases.
+func fetchPRBatchCmd(prs []PR) tea.Cmd {
+	return func() tea.Msg {
+		var q strings.Builder
+		q.WriteString("{")
+		for i, p := range prs {
+			fmt.Fprintf(&q, "p%d: repository(owner: %q, name: %q) { pullRequest(number: %d) { %s } }\n",
+				i, p.Repository.Owner.Login, p.Repository.Name, p.Number, prRowFields)
+		}
+		q.WriteString("}")
+		out, err := graphqlPOST(q.String())
 		if err != nil {
-			return prRefreshedMsg{err: err}
+			return prsRefreshedMsg{err: err}
 		}
 		var resp struct {
-			Data struct {
-				Repository struct {
-					PullRequest PR `json:"pullRequest"`
-				} `json:"repository"`
+			Data map[string]*struct {
+				PullRequest *PR `json:"pullRequest"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(out, &resp); err != nil {
-			return prRefreshedMsg{err: err}
+			return prsRefreshedMsg{err: err}
 		}
-		updated := resp.Data.Repository.PullRequest
-		updated.Repository = pr.Repository
-		return prRefreshedMsg{pr: updated}
+		var updated []PR
+		for i, p := range prs {
+			// A PR deleted or made inaccessible comes back null; the search refresh prunes it.
+			r := resp.Data[fmt.Sprintf("p%d", i)]
+			if r == nil || r.PullRequest == nil {
+				continue
+			}
+			u := *r.PullRequest
+			u.Repository = p.Repository
+			updated = append(updated, u)
+		}
+		return prsRefreshedMsg{prs: updated}
+	}
+}
+
+func fetchSinglePRCmd(pr PR) tea.Cmd {
+	return func() tea.Msg {
+		msg := fetchPRBatchCmd([]PR{pr})().(prsRefreshedMsg)
+		switch {
+		case msg.err != nil:
+			return prRefreshedMsg{err: msg.err}
+		case len(msg.prs) == 0:
+			return prRefreshedMsg{err: fmt.Errorf("PR #%d not found", pr.Number)}
+		}
+		return prRefreshedMsg{pr: msg.prs[0]}
 	}
 }
 
@@ -767,6 +825,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scheduleKittyFlush()
 	}
 	next, cmd := m.update(msg)
+	if nm := next.(model); nm.detail != nil {
+		// Panes render lazily, only once their tab is showing.
+		nm.detail.ensure()
+		nm.detail.clampScroll(nm.height)
+	}
 	// Any rebuild may have queued image transmissions for the next frame.
 	return next, tea.Batch(cmd, scheduleKittyFlush())
 }
@@ -783,19 +846,21 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case prPatchFetchedMsg:
-		m.handlePatchFetched(msg)
-		return m, nil
+		return m, m.handlePatchFetched(msg)
+
+	case patchParsedMsg:
+		return m, m.handlePatchParsed(msg)
 
 	case prDetailFetchedMsg:
-		return m, m.handleDetailFetched(msg)
+		return m, m.handleDetailFetched(msg, true)
 
 	case diskCacheLoadedMsg:
-		return m, m.handleDiskCacheLoaded(msg)
+		return m, m.handleDiskCacheLoaded(msg, true)
 
 	case imagesLoadedMsg:
 		handleImagesLoaded(msg)
 		if m.detail != nil {
-			m.detail.rebuild(m.width)
+			m.detail.rebuildForImages()
 			m.detail.clampScroll(m.height)
 		}
 		return m, nil
@@ -821,7 +886,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleMergeDone(msg)
 
 	case startRefreshMsg:
-		return m, tea.Batch(m.startRefresh(), m.schedulePrefetch())
+		return m, tea.Batch(m.startRefresh(), m.schedulePrefetch(), m.enqueueWarm())
+
+	case warmDoneMsg:
+		return m, m.handleWarmDone(msg)
 
 	case prPageLoadedMsg:
 		// Stale message from a prior refresh — ignore.
@@ -840,18 +908,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		index := make(map[string]int, len(m.prs))
+		for i := range m.prs {
+			index[prKey(m.prs[i])] = i
+		}
 		for _, np := range msg.prs {
 			key := prKey(np)
 			m.refreshSeen[key] = true
-			found := false
-			for i := range m.prs {
-				if prKey(m.prs[i]) == key {
-					m.prs[i] = np
-					found = true
-					break
-				}
-			}
-			if !found {
+			if i, ok := index[key]; ok {
+				m.prs[i] = np
+			} else {
+				index[key] = len(m.prs)
 				m.prs = append(m.prs, np)
 			}
 		}
@@ -874,9 +941,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.prs = kept
-			if !demoMode {
-				savePRsToCache(m.prs)
-			}
 			m.refreshing = false
 		}
 
@@ -887,7 +951,19 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.visibleCount = len(m.filtered)
 
+		// Fresh updatedAt/head values: re-warm anything that changed.
+		if !m.refreshing {
+			return m, tea.Batch(next, m.enqueueWarm(), m.markPRsDirty())
+		}
 		return m, next
+
+	case savePRsMsg:
+		m.prsSaveScheduled = false
+		if m.prsDirty {
+			m.prsDirty = false
+			savePRsToCache(m.prs)
+		}
+		return m, nil
 
 	case tickMsg:
 		if m.visibleCount < len(m.filtered) {
@@ -958,23 +1034,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Best-effort; leave the list alone on failure.
 			return m, nil
 		}
-		for i := range m.prs {
-			if m.prs[i].Number == msg.pr.Number &&
-				m.prs[i].Repository.Name == msg.pr.Repository.Name &&
-				m.prs[i].Repository.Owner.Login == msg.pr.Repository.Owner.Login {
-				m.prs[i] = msg.pr
-				break
-			}
+		return m, m.applyRefreshedPRs([]PR{msg.pr})
+
+	case prsRefreshedMsg:
+		if msg.err != nil {
+			return m, nil
 		}
-		if m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr) {
-			m.detail.pr = msg.pr
-		}
-		// Every active filter (repo, status, author) must survive the rebuild, not just typed text.
-		m.applyFilterKeepingCursor()
-		if !demoMode {
-			savePRsToCache(m.prs)
-		}
-		return m, nil
+		return m, m.applyRefreshedPRs(msg.prs)
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -1152,14 +1218,36 @@ func (m *model) applyFilter() {
 }
 
 // applyFilterKeepingCursor re-filters after data changes without moving the selection.
+// applyRefreshedPRs swaps updated rows in, re-filtering once per batch.
+func (m *model) applyRefreshedPRs(updated []PR) tea.Cmd {
+	for _, u := range updated {
+		for i := range m.prs {
+			if samePR(m.prs[i], u) {
+				m.prs[i] = u
+				break
+			}
+		}
+		if m.detail != nil && samePR(m.detail.pr, u) {
+			m.detail.pr = u
+		}
+	}
+	// Every active filter (repo, status, author) must survive the rebuild, not just typed text.
+	m.applyFilterKeepingCursor()
+	return m.markPRsDirty()
+}
+
 func (m *model) applyFilterKeepingCursor() {
-	var selected string
+	var selected *PR
 	if m.cursor < len(m.filtered) {
-		selected = prKey(m.filtered[m.cursor])
+		pr := m.filtered[m.cursor]
+		selected = &pr
 	}
 	m.applyFilter()
+	if selected == nil {
+		return
+	}
 	for i, pr := range m.filtered {
-		if prKey(pr) == selected {
+		if samePR(pr, *selected) {
 			m.cursor = i
 			break
 		}
@@ -1463,45 +1551,39 @@ func (m *model) cycleStatusFilter() {
 	m.applyFilter()
 }
 
-func getStatusBadge(pr PR) string {
-	if pr.IsDraft {
-		return draftStyle.Render("[Draft]")
-	}
+// Status kinds index the badge painters; order matches statusKind.
+var (
+	badgeLabels    = [6]string{"[Draft]", "[Approved]", "[Denied]", "[Commented]", "[Review]", "[Open]"}
+	badgeColors    = [6]string{"241", "78", "196", "117", "214", "39"}
+	badgeSelColors = [6]string{"250", "114", "203", "159", "221", "81"}
+)
 
+func statusKind(pr PR) int {
+	if pr.IsDraft {
+		return 0
+	}
 	switch pr.ReviewDecision {
 	case "APPROVED":
-		return approvedStyle.Render("[Approved]")
+		return 1
 	case "CHANGES_REQUESTED":
-		return changesRequestedStyle.Render("[Denied]")
+		return 2
 	case "REVIEW_REQUIRED":
-		// Check if last review was a comment
 		if len(pr.Reviews.Nodes) > 0 && pr.Reviews.Nodes[0].State == "COMMENTED" {
-			return commentedStyle.Render("[Commented]")
+			return 3
 		}
-		return reviewRequestedStyle.Render("[Review]")
-	default:
-		return openStyle.Render("[Open]")
+		return 4
 	}
+	return 5
+}
+
+func getStatusBadge(pr PR) string {
+	k := statusKind(pr)
+	return sty(badgeColors[k], "", false, false).Render(badgeLabels[k])
 }
 
 func getSelectedStatusBadge(pr PR) string {
-	if pr.IsDraft {
-		return selectedDraftStyle.Render("[Draft]")
-	}
-
-	switch pr.ReviewDecision {
-	case "APPROVED":
-		return selectedApprovedStyle.Render("[Approved]")
-	case "CHANGES_REQUESTED":
-		return selectedChangesRequestedStyle.Render("[Denied]")
-	case "REVIEW_REQUIRED":
-		if len(pr.Reviews.Nodes) > 0 && pr.Reviews.Nodes[0].State == "COMMENTED" {
-			return selectedCommentedStyle.Render("[Commented]")
-		}
-		return selectedReviewRequestedStyle.Render("[Review]")
-	default:
-		return selectedOpenStyle.Render("[Open]")
-	}
+	k := statusKind(pr)
+	return sty(badgeSelColors[k], "", true, false).Render(badgeLabels[k])
 }
 
 func statusLabelForFilter(pr PR) string {
@@ -1523,6 +1605,9 @@ func statusLabelForFilter(pr PR) string {
 		return "open"
 	}
 }
+
+// statusBadgeLabel is the display text of the list status badge.
+func statusBadgeLabel(pr PR) string { return badgeLabels[statusKind(pr)] }
 
 func getReviewer(pr PR) string {
 	// First check requested reviewers
@@ -1674,8 +1759,7 @@ func (m model) view() string {
 		return m.helpView()
 	}
 	var s strings.Builder
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	loadingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	lp := newListPainters()
 
 	// Fixed column widths
 	const (
@@ -1715,7 +1799,7 @@ func (m model) view() string {
 	switch {
 	case m.actionPending:
 		spinner := spinnerFrames[m.spinnerFrame]
-		s.WriteString(loadingStyle.Render("  " + spinner + " Submitting review..."))
+		s.WriteString(lp.loading.Render("  " + spinner + " Submitting review..."))
 	case m.actionStatus != "":
 		style := approvedStyle
 		if strings.HasPrefix(m.actionStatus, "Error") || strings.Contains(m.actionStatus, "cancelled") {
@@ -1725,14 +1809,14 @@ func (m model) view() string {
 	case filterLine == "  ":
 		s.WriteString(filterLine)
 	default:
-		s.WriteString(filterStyle.Render(filterLine))
+		s.WriteString(lp.filter.Render(filterLine))
 	}
 	s.WriteString("\n")
 
 	// Always show header
-	s.WriteString(dimStyle.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
+	s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
 	s.WriteString("\n")
-	s.WriteString(dimStyle.Render("  " + strings.Repeat("─", separatorWidth)))
+	s.WriteString(lp.dim.Render("  " + strings.Repeat("─", separatorWidth)))
 	s.WriteString("\n")
 
 	if m.err != nil {
@@ -1743,7 +1827,7 @@ func (m model) view() string {
 
 	if m.loading {
 		spinner := spinnerFrames[m.spinnerFrame]
-		s.WriteString(loadingStyle.Render("  " + spinner + " Loading..."))
+		s.WriteString(lp.loading.Render("  " + spinner + " Loading..."))
 		s.WriteString("\n")
 		return s.String()
 	}
@@ -1779,58 +1863,55 @@ func (m model) view() string {
 				cursor = "» "
 			}
 
-			// Prepare padded values
-			statusPlain := pad(stripAnsi(getStatusBadge(pr)), colStatus)
-			repo := pad(truncate(pr.Repository.Name, colRepo-1), colRepo)
-			num := pad(fmt.Sprintf("#%d", pr.Number), colNum)
-			title := pad(truncate(pr.Title, colTitle-1), colTitle)
-			author := pad(truncate(pr.Author.Login, colAuthor-1), colAuthor)
-			reviewer := pad(truncate(getReviewer(pr), colReviewer-1), colReviewer)
-			branch := pad(truncate(pr.HeadRefName, colBranch-1), colBranch)
+			kind := statusKind(pr)
+			label := badgeLabels[kind]
+			repo, repoW := padW(truncate(pr.Repository.Name, colRepo-1), colRepo)
+			num, numW := padW("#"+strconv.Itoa(pr.Number), colNum)
+			title, titleW := padW(truncate(pr.Title, colTitle-1), colTitle)
+			author, authorW := padW(truncate(pr.Author.Login, colAuthor-1), colAuthor)
+			reviewer, reviewerW := padW(truncate(getReviewer(pr), colReviewer-1), colReviewer)
+			branch, branchW := padW(truncate(pr.HeadRefName, colBranch-1), colBranch)
 			leftDiff := (colDiff - 1) / 2
 			rightDiff := colDiff - 1 - leftDiff
-			addsPlain := fmt.Sprintf("+%d", pr.Additions)
-			delsPlain := fmt.Sprintf("-%d", pr.Deletions)
-			addsPadded := padLeft(addsPlain, leftDiff)
-			delsPadded := padLeft(delsPlain, rightDiff)
-			diffPlain := addsPadded + " " + delsPadded
-			rowPlain := cursor + statusPlain + repo + num + title + author + reviewer + branch + diffPlain
+			addsPadded, addsW := padLeftW("+"+strconv.Itoa(pr.Additions), leftDiff)
+			delsPadded, delsW := padLeftW("-"+strconv.Itoa(pr.Deletions), rightDiff)
+			statusW := displayWidth(label)
+			if statusW < colStatus {
+				statusW = colStatus
+			}
+			currentWidth := len(cursor) + statusW + repoW + numW + titleW + authorW + reviewerW + branchW + addsW + 1 + delsW
+			statusFill := ""
+			if n := colStatus - len(label); n > 0 {
+				statusFill = spaces(n)
+			}
 
 			if isSelected {
-				s.WriteString(caretStyle.Render(cursor))
-				s.WriteString(getSelectedStatusBadge(pr) + strings.Repeat(" ", colStatus-len(stripAnsi(getSelectedStatusBadge(pr)))))
-				s.WriteString(selectedNormalStyle.Render(repo))
-				s.WriteString(selectedNormalStyle.Render(num))
-				s.WriteString(selectedNormalStyle.Render(title))
-				s.WriteString(selectedStyle.Render(author))
-				s.WriteString(selectedReviewRequestedStyle.Render(reviewer))
-				s.WriteString(selectedBranchStyle.Render(branch))
-				s.WriteString(selectedAdditionsStyle.Render(addsPadded))
+				s.WriteString(lp.caret.Render(cursor))
+				s.WriteString(lp.selBadge[kind].Render(label) + statusFill)
+				s.WriteString(lp.selNormal.Render(repo))
+				s.WriteString(lp.selNormal.Render(num))
+				s.WriteString(lp.selNormal.Render(title))
+				s.WriteString(lp.selAuthor.Render(author))
+				s.WriteString(lp.selReviewer.Render(reviewer))
+				s.WriteString(lp.selBranch.Render(branch))
+				s.WriteString(lp.selAdds.Render(addsPadded))
 				s.WriteString(" ")
-				s.WriteString(selectedDeletionsStyle.Render(delsPadded))
-
-				currentWidth := displayWidth(rowPlain)
-				if currentWidth < rowWidth {
-					s.WriteString(strings.Repeat(" ", rowWidth-currentWidth))
-				}
+				s.WriteString(lp.selDels.Render(delsPadded))
 			} else {
 				s.WriteString(cursor)
-				// Apply colors after padding
-				s.WriteString(getStatusBadge(pr) + strings.Repeat(" ", colStatus-len(stripAnsi(getStatusBadge(pr)))))
-				s.WriteString(normalStyle.Render(repo))
-				s.WriteString(normalStyle.Render(num))
-				s.WriteString(normalStyle.Render(title))
-				s.WriteString(dimStyle.Render(author))
-				s.WriteString(reviewRequestedStyle.Render(reviewer))
-				s.WriteString(branchStyle.Render(branch))
-				s.WriteString(additionsStyle.Render(addsPadded))
+				s.WriteString(lp.badge[kind].Render(label) + statusFill)
+				s.WriteString(lp.normal.Render(repo))
+				s.WriteString(lp.normal.Render(num))
+				s.WriteString(lp.normal.Render(title))
+				s.WriteString(lp.dim.Render(author))
+				s.WriteString(lp.reviewer.Render(reviewer))
+				s.WriteString(lp.branch.Render(branch))
+				s.WriteString(lp.adds.Render(addsPadded))
 				s.WriteString(" ")
-				s.WriteString(deletionsStyle.Render(delsPadded))
-
-				currentWidth := displayWidth(rowPlain)
-				if currentWidth < rowWidth {
-					s.WriteString(strings.Repeat(" ", rowWidth-currentWidth))
-				}
+				s.WriteString(lp.dels.Render(delsPadded))
+			}
+			if currentWidth < rowWidth {
+				s.WriteString(spaces(rowWidth - currentWidth))
 			}
 			s.WriteString("\n")
 		}
@@ -1842,25 +1923,91 @@ func (m model) view() string {
 			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))
 		}
 		if m.confirmAction == "approve" && m.confirmPR != nil {
-			s.WriteString(filterStyle.Render(fmt.Sprintf("  Approve PR #%d? (y/n)", m.confirmPR.Number)))
+			s.WriteString(lp.filter.Render(fmt.Sprintf("  Approve PR #%d? (y/n)", m.confirmPR.Number)))
 		} else if m.refreshing {
 			spinner := spinnerFrames[m.spinnerFrame]
-			s.WriteString(loadingStyle.Render("  " + spinner + " Refreshing"))
+			s.WriteString(lp.loading.Render("  " + spinner + " Refreshing"))
 		}
 	}
 
 	s.WriteString("\n")
-	s.WriteString(helpStyle.Render(truncateToWidth("  ?: help · /: filter · v: view · enter: checkout · q: quit", rowWidth)))
+	s.WriteString(lp.help.Render(truncateToWidth("  ?: help · /: filter · v: view · enter: checkout · q: quit", rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()
 }
 
+// listPainters holds the cached painters for one list frame.
+type listPainters struct {
+	dim, loading, filter, help               painter
+	caret, selNormal, selAuthor, selReviewer painter
+	selBranch, selAdds, selDels              painter
+	normal, reviewer, branch, adds, dels     painter
+	badge, selBadge                          [6]painter
+}
+
+func newListPainters() listPainters {
+	lp := listPainters{
+		dim:         sty("240", "", false, false),
+		loading:     sty("214", "", false, false),
+		filter:      sty("220", "", true, false),
+		help:        sty("241", "", false, false),
+		caret:       sty("33", "", true, false),
+		selNormal:   sty("15", "", true, false),
+		selAuthor:   sty("", "", true, false),
+		selReviewer: sty("221", "", true, false),
+		selBranch:   sty("183", "", true, false),
+		selAdds:     sty("114", "", true, false),
+		selDels:     sty("203", "", true, false),
+		normal:      sty("252", "", false, false),
+		reviewer:    sty("214", "", false, false),
+		branch:      sty("141", "", false, false),
+		adds:        sty("78", "", false, false),
+		dels:        sty("196", "", false, false),
+	}
+	for k := range badgeLabels {
+		lp.badge[k] = sty(badgeColors[k], "", false, false)
+		lp.selBadge[k] = sty(badgeSelColors[k], "", true, false)
+	}
+	return lp
+}
+
+const spaceRun = "                                                                                "
+
+func spaces(n int) string {
+	if n <= len(spaceRun) {
+		return spaceRun[:n]
+	}
+	return strings.Repeat(" ", n)
+}
+
+// isPlainASCII reports whether every byte is printable ASCII, where width == len.
+func isPlainASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 func displayWidth(s string) int {
+	if isPlainASCII(s) {
+		return len(s)
+	}
 	return lipgloss.Width(s)
 }
 
 func truncate(s string, max int) string {
+	if isPlainASCII(s) {
+		if len(s) <= max {
+			return s
+		}
+		if max > 3 {
+			return s[:max-3] + "..."
+		}
+		return "..."
+	}
 	if displayWidth(s) <= max {
 		return s
 	}
@@ -1875,20 +2022,31 @@ func truncate(s string, max int) string {
 	return "..."
 }
 
-func pad(s string, width int) string {
+// padW pads s to width and returns the resulting display width.
+func padW(s string, width int) (string, int) {
 	w := displayWidth(s)
 	if w >= width {
-		return s
+		return s, w
 	}
-	return s + strings.Repeat(" ", width-w)
+	return s + spaces(width-w), width
+}
+
+func padLeftW(s string, width int) (string, int) {
+	w := displayWidth(s)
+	if w >= width {
+		return s, w
+	}
+	return spaces(width-w) + s, width
+}
+
+func pad(s string, width int) string {
+	out, _ := padW(s, width)
+	return out
 }
 
 func padLeft(s string, width int) string {
-	w := displayWidth(s)
-	if w >= width {
-		return s
-	}
-	return strings.Repeat(" ", width-w) + s
+	out, _ := padLeftW(s, width)
+	return out
 }
 
 func truncateToWidth(s string, max int) string {
@@ -1907,7 +2065,8 @@ func truncateToWidth(s string, max int) string {
 
 func stripAnsi(s string) string {
 	// Simple ANSI stripper for badge text
-	result := ""
+	var b strings.Builder
+	b.Grow(len(s))
 	inEscape := false
 	for _, r := range s {
 		if r == '\x1b' {
@@ -1920,9 +2079,9 @@ func stripAnsi(s string) string {
 			}
 			continue
 		}
-		result += string(r)
+		b.WriteRune(r)
 	}
-	return result
+	return b.String()
 }
 
 func main() {
@@ -1988,11 +2147,15 @@ func main() {
 	}
 
 	go pruneDiskCache()
+	go pruneImageCache()
 	detectImageMode()
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
 	kittyFreeAll()
+	if fm, ok := finalModel.(model); ok && fm.prsDirty {
+		savePRsToCache(fm.prs)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

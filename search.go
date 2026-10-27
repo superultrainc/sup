@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/ansi"
 )
 
 // detailSearch is the PR view's `/` search over the active tab's lines.
@@ -28,8 +27,8 @@ func (v *prDetailView) refreshSearch() {
 	}
 	q := strings.ToLower(s.query)
 	s.matches = s.matches[:0]
-	for i, l := range v.pane().lines {
-		if strings.Contains(strings.ToLower(ansi.Strip(l)), q) {
+	for i, l := range v.pane().plainLines() {
+		if strings.Contains(l, q) {
 			s.matches = append(s.matches, i)
 		}
 	}

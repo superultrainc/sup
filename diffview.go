@@ -5,7 +5,10 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -132,13 +135,30 @@ func highlightFile(f *diffFile, style *chroma.Style) {
 	tokenize(newRefs, func(*diffLine) bool { return true })
 }
 
+// highlightFiles highlights files in parallel; each file only touches its own lines.
 func highlightFiles(files []*diffFile) {
 	style := styles.Get(currentDiffTheme().chroma)
-	for _, f := range files {
+	work := make(chan *diffFile)
+	var wg sync.WaitGroup
+	for i := 0; i < min(runtime.GOMAXPROCS(0), len(files)); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range work {
+				highlightFile(f, style)
+			}
+		}()
+	}
+	// Biggest first so one large file doesn't start last and tail the batch.
+	order := append([]*diffFile(nil), files...)
+	sort.Slice(order, func(i, j int) bool { return order[i].lineCount() > order[j].lineCount() })
+	for _, f := range order {
 		if !f.binary {
-			highlightFile(f, style)
+			work <- f
 		}
 	}
+	close(work)
+	wg.Wait()
 }
 
 // renderCode lays out a line's highlighted text into rows exactly width cells
@@ -658,15 +678,19 @@ type prPatchFetchedMsg struct {
 }
 
 // fetchPatchCmd fetches, parses, and highlights off the UI goroutine.
-func fetchPatchCmd(pr PR) tea.Cmd {
+// parse is false for background warming, which keeps only the raw patch.
+func fetchPatchCmd(pr PR, parse bool) tea.Cmd {
 	return func() tea.Msg {
 		patch, err := fetchPRPatch(pr)
 		if err != nil {
 			return prPatchFetchedMsg{key: prKey(pr), err: err}
 		}
-		files := parseUnifiedDiff(string(patch))
-		highlightFiles(files)
-		return prPatchFetchedMsg{key: prKey(pr), files: files, patch: string(patch), head: pr.HeadRefOid}
+		msg := prPatchFetchedMsg{key: prKey(pr), patch: string(patch), head: pr.HeadRefOid}
+		if parse {
+			msg.files = parseUnifiedDiff(msg.patch)
+			highlightFiles(msg.files)
+		}
+		return msg
 	}
 }
 

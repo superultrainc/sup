@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"image"
 	"image/color"
+	"image/png"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -52,5 +57,47 @@ func TestHalfBlocksSize(t *testing.T) {
 	}
 	if got := halfBlocks(image.NewRGBA(image.Rect(0, 0, 100, 1000)), 80, 10, darkDiffTheme); len(got) != 10 {
 		t.Fatalf("tall images should cap at maxRows, got %d rows", len(got))
+	}
+}
+
+func TestLoadImageDownscales(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	imagesKitty = true
+	defer func() { imagesKitty = false }()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewNRGBA(image.Rect(0, 0, 4000, 3000))); err != nil {
+		t.Fatal(err)
+	}
+	j := imageJob{key: "big", url: "x"}
+	path := imageCachePath(j.key)
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, buf.Bytes(), 0644)
+	img, b64, err := loadImage(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := img.Bounds(); b.Dx() > 1600 || b.Dy() > 1600 || b.Dx() < 1500 {
+		t.Fatalf("bad size %v", b)
+	}
+	if b64 == "" {
+		t.Fatal("want kitty payload")
+	}
+}
+
+func TestPruneImageCache(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := filepath.Join(cacheDir(), "img")
+	os.MkdirAll(dir, 0755)
+	oldF, newF := filepath.Join(dir, "old"), filepath.Join(dir, "new")
+	os.WriteFile(oldF, nil, 0644)
+	os.WriteFile(newF, nil, 0644)
+	past := time.Now().Add(-15 * 24 * time.Hour)
+	os.Chtimes(oldF, past, past)
+	pruneImageCache()
+	if _, err := os.Stat(oldF); err == nil {
+		t.Fatal("old file should be pruned")
+	}
+	if _, err := os.Stat(newF); err != nil {
+		t.Fatal("new file should stay")
 	}
 }

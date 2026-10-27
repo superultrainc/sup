@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -77,9 +79,10 @@ func htmlImageSrcs(html string) []string {
 }
 
 type imageEntry struct {
-	img     image.Image
-	err     error
-	loading bool
+	img      image.Image
+	kittyB64 string // base64 PNG for kitty, built off the UI goroutine
+	err      error
+	loading  bool
 }
 
 // Keyed by the image's markdown URL, which is stable; only touched from Update.
@@ -144,9 +147,9 @@ func queueImages(d *prDetail, retryFailed bool) tea.Cmd {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				img, err := loadImage(j)
+				img, b64, err := loadImage(j)
 				mu.Lock()
-				results[j.key] = imageEntry{img: img, err: err}
+				results[j.key] = imageEntry{img: img, kittyB64: b64, err: err}
 				mu.Unlock()
 			}(j)
 		}
@@ -160,25 +163,56 @@ func imageCachePath(key string) string {
 	return filepath.Join(cacheDir(), "img", hex.EncodeToString(sum[:]))
 }
 
-func loadImage(j imageJob) (image.Image, error) {
+const maxImageDim = 1600
+
+// finishImage bounds the decoded size and, in kitty mode, builds the payload.
+func finishImage(img image.Image) (image.Image, string) {
+	b := img.Bounds()
+	if w, h := b.Dx(), b.Dy(); w > maxImageDim || h > maxImageDim {
+		s := float64(maxImageDim) / float64(max(w, h))
+		img = resample(img, max(int(float64(w)*s), 1), max(int(float64(h)*s), 1))
+	}
+	if !imagesKitty {
+		return img, ""
+	}
+	return img, kittyEncode(img)
+}
+
+func loadImage(j imageJob) (image.Image, string, error) {
 	path := imageCachePath(j.key)
 	if f, err := os.Open(path); err == nil {
 		defer f.Close()
 		if img, _, err := image.Decode(f); err == nil {
-			return img, nil
+			img, b64 := finishImage(img)
+			return img, b64, nil
 		}
 	}
 	data, err := downloadImage(j.url)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	img, _, err := image.Decode(strings.NewReader(string(data)))
+	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("unsupported image")
+		return nil, "", fmt.Errorf("unsupported image")
 	}
 	os.MkdirAll(filepath.Dir(path), 0755)
 	os.WriteFile(path, data, 0644)
-	return img, nil
+	img, b64 := finishImage(img)
+	return img, b64, nil
+}
+
+// pruneImageCache drops cached images nobody has needed in a while.
+func pruneImageCache() {
+	dir := filepath.Join(cacheDir(), "img")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, de := range entries {
+		if info, err := de.Info(); err == nil && time.Since(info.ModTime()) > 14*24*time.Hour {
+			os.Remove(filepath.Join(dir, de.Name()))
+		}
+	}
 }
 
 func downloadImage(raw string) ([]byte, error) {
@@ -233,7 +267,7 @@ func imageLines(ref imageRef, width int) []string {
 		return []string{muted.Render("▣ " + truncate(label, width-24) + " · image unavailable")}
 	}
 	if imagesKitty {
-		return kittyImageLines(ref.url, e.img, width, imageMaxRow)
+		return kittyImageLines(ref.url, e.img, e.kittyB64, width, imageMaxRow)
 	}
 	key := fmt.Sprintf("%s\x00%d", ref.url, width)
 	if lines, ok := imageRenders[key]; ok {

@@ -227,6 +227,7 @@ func (m *model) handleMergeDone(msg mergeDoneMsg) tea.Cmd {
 	if v != nil {
 		v.merge = nil
 	}
+	var save tea.Cmd
 	key := prKey(msg.pr)
 	if msg.auto {
 		m.actionStatus = fmt.Sprintf("✓ Auto-merge enabled for #%d (%s)", msg.pr.Number, strings.ToLower(msg.method.label))
@@ -242,17 +243,15 @@ func (m *model) handleMergeDone(msg mergeDoneMsg) tea.Cmd {
 		m.prs = kept
 		m.syncRepoList()
 		m.applyFilterKeepingCursor()
-		if !demoMode {
-			savePRsToCache(m.prs)
-		}
+		save = m.markPRsDirty()
 	}
 	if v != nil && prKey(v.pr) == key {
 		e := m.cacheEntry(key)
 		e.detailAt = e.detailAt.AddDate(-1, 0, 0) // force a refetch to show the new state
 		v.loading = true
-		return tea.Batch(append(m.fetchMissing(v.pr, e), spinnerTick())...)
+		return tea.Batch(append(m.fetchMissing(v.pr, e), spinnerTick(), save)...)
 	}
-	return nil
+	return save
 }
 
 func (m model) mergeView(height int) []string {

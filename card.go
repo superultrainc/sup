@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
@@ -11,13 +10,31 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// styleCache avoids rebuilding a lipgloss.Style per highlighted token.
-var styleCache = map[[4]string]lipgloss.Style{}
+// painter wraps text in a style's escape codes. lipgloss.Style.Render is
+// too slow for per-token use (it copies a large struct and re-measures),
+// so each style is rendered once around a marker and the codes reused.
+type painter struct{ prefix, suffix string }
 
-func sty(fg, bg string, bold, italic bool) lipgloss.Style {
-	key := [4]string{fg, bg, fmt.Sprint(bold), fmt.Sprint(italic)}
-	if s, ok := styleCache[key]; ok {
+func (p painter) Render(s string) string {
+	if p.prefix == "" || s == "" {
 		return s
+	}
+	return p.prefix + s + p.suffix
+}
+
+const paintMarker = ""
+
+type styleKey struct {
+	fg, bg       string
+	bold, italic bool
+}
+
+var styleCache = map[styleKey]painter{}
+
+func sty(fg, bg string, bold, italic bool) painter {
+	key := styleKey{fg, bg, bold, italic}
+	if p, ok := styleCache[key]; ok {
+		return p
 	}
 	s := lipgloss.NewStyle().Bold(bold).Italic(italic)
 	if fg != "" {
@@ -26,8 +43,13 @@ func sty(fg, bg string, bold, italic bool) lipgloss.Style {
 	if bg != "" {
 		s = s.Background(lipgloss.Color(bg))
 	}
-	styleCache[key] = s
-	return s
+	var p painter
+	// Rendering through lipgloss keeps its color-profile downgrade (256/16 colors).
+	if before, after, ok := strings.Cut(s.Render(paintMarker), paintMarker); ok {
+		p = painter{before, after}
+	}
+	styleCache[key] = p
+	return p
 }
 
 // fitWidth truncates or pads s to exactly w cells.
@@ -72,8 +94,28 @@ func textCard(title, border string, body []string, width int) []string {
 
 var mdRenderers = map[int]*glamour.TermRenderer{}
 
+type mdKey struct {
+	width int
+	body  string
+}
+
+// mdCache memoizes rendered markdown: glamour costs ~0.5ms per comment and
+// the conversation re-renders on every refresh, image load, and resize.
+var mdCache = map[mdKey][]string{}
+
 // markdownLines renders GitHub markdown to lines at most width cells wide.
+// Callers must not modify the returned slice; it's shared via mdCache.
 func markdownLines(body string, width int) []string {
+	key := mdKey{width, body}
+	if lines, ok := mdCache[key]; ok {
+		return lines
+	}
+	lines := renderMarkdown(body, width)
+	mdCache[key] = lines
+	return lines
+}
+
+func renderMarkdown(body string, width int) []string {
 	body = cleanBody(body)
 	if body == "" {
 		return nil
@@ -114,5 +156,6 @@ func markdownLines(body string, width int) []string {
 	for len(lines) > 0 && blank(lines[len(lines)-1]) {
 		lines = lines[:len(lines)-1]
 	}
-	return lines
+	// Cap capacity so a caller's append copies instead of writing into the cached array.
+	return lines[:len(lines):len(lines)]
 }

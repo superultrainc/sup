@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // glamourStyle is resolved before the TUI starts; querying the terminal mid-program garbles input.
@@ -135,6 +136,7 @@ type prDetail struct {
 	ReviewDecision string    `json:"reviewDecision"`
 	Mergeable      string    `json:"mergeable"`
 	HeadRefOid     string    `json:"headRefOid"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 	// mergeStateStatus is GitHub's merge-button state: CLEAN, BLOCKED, BEHIND, DIRTY, UNSTABLE, HAS_HOOKS, DRAFT, UNKNOWN.
 	MergeStateStatus      string `json:"mergeStateStatus"`
 	ViewerCanMergeAsAdmin bool   `json:"viewerCanMergeAsAdmin"`
@@ -198,7 +200,7 @@ const prDetailQuery = `{
 			title body bodyHTML url state isDraft createdAt
 			author { login }
 			baseRefName headRefName additions deletions changedFiles reviewDecision mergeable
-			headRefOid mergeStateStatus viewerCanMergeAsAdmin
+			headRefOid updatedAt mergeStateStatus viewerCanMergeAsAdmin
 			autoMergeRequest { mergeMethod }
 			repository { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerDefaultMergeMethod }
 			labels(first: 20) { nodes { name color } }
@@ -258,13 +260,21 @@ func fetchPRDetail(pr PR) (*prDetail, error) {
 type prDetailFetchedMsg struct {
 	key    string
 	detail *prDetail
+	raw    []byte // detail as JSON, for the disk cache
+	fp     string // raw minus bodyHTML, for change detection
 	err    error
 }
 
+// fetchPRDetailCmd also encodes and fingerprints the detail here, off the UI goroutine.
 func fetchPRDetailCmd(pr PR) tea.Cmd {
 	return func() tea.Msg {
 		d, err := fetchPRDetail(pr)
-		return prDetailFetchedMsg{key: prKey(pr), detail: d, err: err}
+		msg := prDetailFetchedMsg{key: prKey(pr), detail: d, err: err}
+		if err == nil {
+			msg.raw, _ = json.Marshal(d)
+			msg.fp = detailFingerprint(msg.raw)
+		}
+		return msg
 	}
 }
 
@@ -301,6 +311,25 @@ type detailPane struct {
 	lines  []string
 	marks  []int // [ / ] jump targets
 	scroll int
+
+	plain   []string // lowercased, unstyled lines for search
+	plainOf *string  // &lines[0] when plain was built; a rebuild swaps lines and invalidates it
+}
+
+// plainLines returns the pane's searchable text, rebuilt only when lines change.
+func (p *detailPane) plainLines() []string {
+	if len(p.lines) == 0 {
+		return nil
+	}
+	if p.plainOf == &p.lines[0] && len(p.plain) == len(p.lines) {
+		return p.plain
+	}
+	p.plain = make([]string, len(p.lines))
+	for i, l := range p.lines {
+		p.plain[i] = strings.ToLower(ansi.Strip(l))
+	}
+	p.plainOf = &p.lines[0]
+	return p.plain
 }
 
 // Tab order; the diff comes right after the conversation.
@@ -331,6 +360,7 @@ type prDetailView struct {
 	picker      *reviewerPicker // non-nil while the reviewer picker is open
 	merge       *mergeDialog    // non-nil while the merge dialog is open
 	search      *detailSearch   // non-nil while a `/` search is being typed or is active
+	dirty       [tabCount]bool  // panes needing a render before they're shown
 }
 
 func newDetailView(pr PR) *prDetailView {
@@ -419,13 +449,85 @@ func (v *prDetailView) isSplit() bool {
 	return v.mainWidth(tabFiles) >= 150
 }
 
+// applyDetail swaps in new PR data, re-rendering the diff only when review
+// threads (the one thing it shows from the detail) changed; that pane is the expensive one.
+func (v *prDetailView) applyDetail(d *prDetail) {
+	threadsChanged := v.detail == nil || threadsKey(v.detail) != threadsKey(d)
+	v.detail = d
+	v.width = max(v.width, 40)
+	v.invalidate(tabConversation, tabCommits, tabChecks)
+	if threadsChanged {
+		v.invalidate(tabFiles)
+	}
+	v.ensure()
+}
+
+// rebuildForImages re-renders the panes that can show the newly loaded images.
+func (v *prDetailView) rebuildForImages() {
+	v.width = max(v.width, 40)
+	v.invalidate(tabConversation)
+	if v.detail != nil {
+		for _, t := range v.detail.ReviewThreads.Nodes {
+			for _, c := range t.Comments.Nodes {
+				if len(findImages(c.Body)) > 0 {
+					v.invalidate(tabFiles)
+				}
+			}
+		}
+	}
+	v.ensure()
+}
+
+// threadsKey summarizes what the diff pane renders from review threads.
+func threadsKey(d *prDetail) string {
+	var sb strings.Builder
+	for _, t := range d.ReviewThreads.Nodes {
+		line := 0
+		if t.Line != nil {
+			line = *t.Line
+		}
+		fmt.Fprintf(&sb, "%s:%d:%v:%v|", t.Path, line, t.IsResolved, t.IsOutdated)
+		for _, c := range t.Comments.Nodes {
+			sb.WriteString(c.Author.Login + "\x00" + c.Body + "\x00")
+		}
+	}
+	return sb.String()
+}
+
+// rebuild re-lays out every tab for a new width; only the visible one renders now.
 func (v *prDetailView) rebuild(width int) {
 	// Width is 0 until the first WindowSizeMsg; cards need room for their borders.
 	v.width = max(width, 40)
-	v.rebuildConv()
-	v.rebuildCommits()
-	v.rebuildChecks()
-	v.rebuildFiles()
+	v.invalidate(tabConversation, tabFiles, tabCommits, tabChecks)
+	v.ensure()
+}
+
+// invalidate marks tabs stale. Panes render lazily (see ensure), so resizes and
+// data updates only pay for the tab on screen.
+func (v *prDetailView) invalidate(tabs ...int) {
+	for _, t := range tabs {
+		v.dirty[t] = true
+	}
+}
+
+func (v *prDetailView) invalidateFiles() { v.invalidate(tabFiles) }
+
+// ensure renders the visible tab if it's stale; Update calls it after every message.
+func (v *prDetailView) ensure() {
+	if !v.dirty[v.tab] {
+		return
+	}
+	v.dirty[v.tab] = false
+	switch v.tab {
+	case tabConversation:
+		v.rebuildConv()
+	case tabCommits:
+		v.rebuildCommits()
+	case tabChecks:
+		v.rebuildChecks()
+	case tabFiles:
+		v.rebuildFilesKeepingPlace()
+	}
 	v.refreshSearch()
 }
 
@@ -451,6 +553,7 @@ func (v *prDetailView) rebuildFilesKeepingPlace() {
 }
 
 func (v *prDetailView) rebuildFiles() {
+	v.dirty[tabFiles] = false
 	p := &v.panes[tabFiles]
 	if v.diff == nil {
 		p.lines, p.marks, v.threadMarks = nil, nil, nil

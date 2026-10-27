@@ -865,11 +865,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		var selectedPRNumber int
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			selectedPRNumber = m.filtered[m.cursor].Number
-		}
-
 		for _, np := range msg.prs {
 			key := prKey(np)
 			m.refreshSeen[key] = true
@@ -912,23 +907,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		sortPRsByOldestFirst(m.prs)
 		m.syncRepoList()
-
-		m.applyFilter()
-
-		if selectedPRNumber > 0 {
-			for i, pr := range m.filtered {
-				if pr.Number == selectedPRNumber {
-					m.cursor = i
-					break
-				}
-			}
-		}
-		if m.cursor >= len(m.filtered) {
-			m.cursor = len(m.filtered) - 1
-		}
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
+		m.applyFilterKeepingCursor()
 
 		m.loading = false
 		m.visibleCount = len(m.filtered)
@@ -1014,30 +993,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr) {
 			m.detail.pr = msg.pr
 		}
-		// Preserve cursor across the filter rebuild.
-		var selectedPRNumber int
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			selectedPRNumber = m.filtered[m.cursor].Number
-		}
-		if m.filterText != "" {
-			m.applyFilter()
-		} else {
-			m.filtered = m.prs
-		}
-		if selectedPRNumber > 0 {
-			for i, pr := range m.filtered {
-				if pr.Number == selectedPRNumber {
-					m.cursor = i
-					break
-				}
-			}
-		}
-		if m.cursor >= len(m.filtered) {
-			m.cursor = len(m.filtered) - 1
-		}
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
+		// Every active filter (repo, status, author) must survive the rebuild, not just typed text.
+		m.applyFilterKeepingCursor()
 		if !demoMode {
 			savePRsToCache(m.prs)
 		}
@@ -1242,6 +1199,21 @@ func (m *model) applyFilter() {
 		}
 	}
 	m.cursor = 0
+}
+
+// applyFilterKeepingCursor re-filters after data changes without moving the selection.
+func (m *model) applyFilterKeepingCursor() {
+	var selected string
+	if m.cursor < len(m.filtered) {
+		selected = prKey(m.filtered[m.cursor])
+	}
+	m.applyFilter()
+	for i, pr := range m.filtered {
+		if prKey(pr) == selected {
+			m.cursor = i
+			break
+		}
+	}
 }
 
 func indexOfStatus(name string) int {

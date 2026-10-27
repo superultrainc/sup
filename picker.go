@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -235,25 +233,33 @@ func saveReviewersCmd(pr PR, add, remove []string) tea.Cmd {
 		if demoMode {
 			return msg
 		}
-		args := []string{"pr", "edit", fmt.Sprint(pr.Number), "--repo", pr.Repository.Owner.Login + "/" + pr.Repository.Name}
+		path := fmt.Sprintf("%s/pulls/%d/requested_reviewers", repoPath(pr), pr.Number)
 		if len(add) > 0 {
-			args = append(args, "--add-reviewer", strings.Join(add, ","))
+			if _, err := githubREST("POST", path, reviewerBody(add)); err != nil {
+				msg.err = err
+				return msg
+			}
 		}
 		if len(remove) > 0 {
-			args = append(args, "--remove-reviewer", strings.Join(remove, ","))
-		}
-		cmd := exec.Command("gh", args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			text := strings.TrimSpace(stderr.String())
-			if text == "" {
-				text = err.Error()
+			if _, err := githubREST("DELETE", path, reviewerBody(remove)); err != nil {
+				msg.err = err
 			}
-			msg.err = fmt.Errorf("%s", text)
 		}
 		return msg
 	}
+}
+
+// reviewerBody splits candidate ids into users and team slugs ("org/slug").
+func reviewerBody(ids []string) map[string][]string {
+	body := map[string][]string{"reviewers": {}, "team_reviewers": {}}
+	for _, id := range ids {
+		if _, slug, ok := strings.Cut(id, "/"); ok {
+			body["team_reviewers"] = append(body["team_reviewers"], slug)
+		} else {
+			body["reviewers"] = append(body["reviewers"], id)
+		}
+	}
+	return body
 }
 
 func (m model) handlePickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

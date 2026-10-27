@@ -93,7 +93,7 @@ func graphqlPOST(query string) ([]byte, error) {
 
 func graphqlPOSTOnce(query string) ([]byte, int, error) {
 	body, _ := json.Marshal(map[string]string{"query": query})
-	req, err := http.NewRequest("POST", "https://api.github.com/graphql", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", githubAPI+"/graphql", bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -537,55 +537,29 @@ func findRepoPath(repoName string) string {
 
 // getCurrentUser gets the authenticated GitHub username
 func getCurrentUser() string {
-	cmd := exec.Command("gh", "api", "user", "--jq", ".login")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(output))
+	login, _, _ := fetchViewer()
+	return login
 }
 
 // fetchUserOrgs gets the list of organizations the user belongs to
 func fetchUserOrgs() ([]string, error) {
-	cmd := exec.Command("gh", "api", "user/orgs", "--jq", ".[].login")
-	output, err := cmd.Output()
+	_, orgs, err := fetchViewer()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch orgs: %w", err)
 	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	var result []string
-	for _, line := range lines {
-		if line = strings.TrimSpace(line); line != "" {
-			result = append(result, line)
-		}
-	}
-	return result, nil
+	return orgs, nil
 }
+
+var reviewEvents = map[string]string{"approve": "APPROVE", "request-changes": "REQUEST_CHANGES", "comment": "COMMENT"}
 
 func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 	return func() tea.Msg {
-		repoSlug := fmt.Sprintf("%s/%s", pr.Repository.Owner.Login, pr.Repository.Name)
-		args := []string{"pr", "review", fmt.Sprintf("%d", pr.Number), "--repo", repoSlug}
-		switch action {
-		case "approve":
-			args = append(args, "--approve")
-		case "request-changes":
-			args = append(args, "--request-changes", "--body", body)
-		case "comment":
-			args = append(args, "--comment", "--body", body)
+		review := map[string]string{"event": reviewEvents[action]}
+		if body != "" {
+			review["body"] = body
 		}
-		cmd := exec.Command("gh", args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			msg := strings.TrimSpace(stderr.String())
-			if msg == "" {
-				msg = err.Error()
-			}
-			return reviewSubmittedMsg{action: action, pr: pr, err: fmt.Errorf("%s", msg)}
-		}
-		return reviewSubmittedMsg{action: action, pr: pr}
+		_, err := githubREST("POST", fmt.Sprintf("%s/pulls/%d/reviews", repoPath(pr), pr.Number), review)
+		return reviewSubmittedMsg{action: action, pr: pr, err: err}
 	}
 }
 
@@ -699,15 +673,14 @@ func refreshMetaCmd() tea.Msg {
 	if demoMode {
 		return metaRefreshedMsg{orgs: orgs, currentUser: currentUser}
 	}
-	newOrgs := orgs
-	if !mineMode && os.Getenv("SUP_ORG") == "" {
-		if fetched, err := fetchUserOrgs(); err == nil && len(fetched) > 0 {
+	newOrgs, newUser := orgs, currentUser
+	if login, fetched, err := fetchViewer(); err == nil {
+		if login != "" {
+			newUser = login
+		}
+		if !mineMode && os.Getenv("SUP_ORG") == "" && len(fetched) > 0 {
 			newOrgs = fetched
 		}
-	}
-	newUser := getCurrentUser()
-	if newUser == "" {
-		newUser = currentUser
 	}
 	saveCachedMeta(metaCache{Orgs: newOrgs, CurrentUser: newUser})
 	return metaRefreshedMsg{orgs: newOrgs, currentUser: newUser}

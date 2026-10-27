@@ -16,7 +16,7 @@ A terminal UI for browsing and checking out GitHub PRs.
 
 ## Requirements
 
-- [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`)
+- [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`). sup reads its token and talks to the GitHub API directly; `gh` itself only runs for `Enter` (checkout) and merges into repos that use a merge queue.
 
 ## Install
 

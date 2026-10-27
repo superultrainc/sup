@@ -161,8 +161,7 @@ func (m *model) handlePatchFetched(msg prPatchFetchedMsg) {
 	v.diffErr = msg.err
 	if msg.err == nil && (changed || v.diff == nil) {
 		v.diff = msg.files
-		v.rebuildFilesKeepingPlace()
-		v.clampScroll(m.height)
+		v.invalidateFiles()
 	}
 }
 
@@ -256,7 +255,7 @@ func (m *model) handleDiskCacheLoaded(msg diskCacheLoadedMsg) tea.Cmd {
 	}
 	if v.diff == nil && e.files != nil {
 		v.diff = e.files
-		v.rebuildFilesKeepingPlace()
+		v.invalidateFiles()
 	}
 	v.clampScroll(m.height)
 	return images

@@ -332,6 +332,7 @@ type prDetailView struct {
 	picker      *reviewerPicker // non-nil while the reviewer picker is open
 	merge       *mergeDialog    // non-nil while the merge dialog is open
 	search      *detailSearch   // non-nil while a `/` search is being typed or is active
+	filesDirty  bool            // diff pane needs re-rendering before it's shown
 }
 
 func newDetailView(pr PR) *prDetailView {
@@ -430,7 +431,7 @@ func (v *prDetailView) applyDetail(d *prDetail) {
 	v.rebuildCommits()
 	v.rebuildChecks()
 	if threadsChanged {
-		v.rebuildFilesKeepingPlace()
+		v.invalidateFiles()
 	}
 	v.refreshSearch()
 }
@@ -443,7 +444,7 @@ func (v *prDetailView) rebuildForImages() {
 		for _, t := range v.detail.ReviewThreads.Nodes {
 			for _, c := range t.Comments.Nodes {
 				if len(findImages(c.Body)) > 0 {
-					v.rebuildFilesKeepingPlace()
+					v.invalidateFiles()
 					v.refreshSearch()
 					return
 				}
@@ -475,8 +476,22 @@ func (v *prDetailView) rebuild(width int) {
 	v.rebuildConv()
 	v.rebuildCommits()
 	v.rebuildChecks()
-	v.rebuildFiles()
+	v.invalidateFiles()
 	v.refreshSearch()
+}
+
+// invalidateFiles marks the diff pane stale; it's the costly one, so it's only
+// rendered when the Files tab is on screen (see ensureFiles).
+func (v *prDetailView) invalidateFiles() {
+	v.filesDirty = true
+}
+
+// ensureFiles renders a stale diff pane if the Files tab is showing; Update
+// calls it after every message.
+func (v *prDetailView) ensureFiles() {
+	if v.filesDirty && v.tab == tabFiles {
+		v.rebuildFilesKeepingPlace()
+	}
 }
 
 // currentFile is the index of the file at the top of the files pane, or -1.
@@ -501,6 +516,7 @@ func (v *prDetailView) rebuildFilesKeepingPlace() {
 }
 
 func (v *prDetailView) rebuildFiles() {
+	v.filesDirty = false
 	p := &v.panes[tabFiles]
 	if v.diff == nil {
 		p.lines, p.marks, v.threadMarks = nil, nil, nil

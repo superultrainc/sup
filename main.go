@@ -775,6 +775,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scheduleKittyFlush()
 	}
 	next, cmd := m.update(msg)
+	if nm := next.(model); nm.detail != nil {
+		// The diff pane renders lazily, only once the Files tab is showing.
+		nm.detail.ensureFiles()
+		nm.detail.clampScroll(nm.height)
+	}
 	// Any rebuild may have queued image transmissions for the next frame.
 	return next, tea.Batch(cmd, scheduleKittyFlush())
 }

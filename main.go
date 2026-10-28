@@ -1548,7 +1548,7 @@ func (m model) helpView() string {
 		{"Actions", [][2]string{
 			{"Enter", "Checkout PR"},
 			{"v", "Full PR view (conversation + highlighted diff)"},
-			{"m", "Merge PR"},
+			{"m", "Merge PR (or mark draft ready)"},
 			{"d", "Open the PR's diff"},
 			{"A", "Approve"},
 			{"D", "Request changes"},

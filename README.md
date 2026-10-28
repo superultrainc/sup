@@ -80,7 +80,7 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `c` | Copy PR link to clipboard |
 | `v` | Full PR view: conversation (description, checks, reviews, comments) and a syntax-highlighted diff with review threads inline |
 | `d` | Open the PR view on its diff (Files changed tab) |
-| `m` | Merge PR: pick squash / merge commit / rebase, delete the branch, or enable auto-merge |
+| `m` | Merge PR: pick squash / merge commit / rebase, delete the branch, or enable auto-merge. On a draft, marks it ready for review |
 | `A` | Approve PR (with `y`/`n` confirm) |
 | `D` | Request changes — opens `$EDITOR` for body |
 | `M` | Comment on PR — opens `$EDITOR` for body |
@@ -107,7 +107,7 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `w` | Toggle line wrapping |
 | `x` | Collapse / expand the current file |
 | `r` | Request or remove reviewers (type to filter, `space` toggles, `enter` saves) |
-| `m` | Merge (`↑`/`↓` method, `b` delete branch, `a` auto-merge, `!` admin bypass when allowed) |
+| `m` | Merge (`↑`/`↓` method, `b` delete branch, `a` auto-merge, `!` admin bypass when allowed). On a draft, `enter` marks it ready for review |
 | `d` | Jump to Files changed |
 | `R` | Reload |
 | `esc` | Back to the list |

@@ -297,6 +297,9 @@ func mergeBox(d *prDetail, width int, th diffTheme) []string {
 	case "CLOSED":
 		rows = append(rows, row{ok: -1, title: "Closed with unmerged commits"})
 	default:
+		if d.IsDraft {
+			rows = append(rows, row{title: "This pull request is still a draft", sub: "Mark it ready to notify reviewers and allow merging"})
+		}
 		latest, order := latestReviewStates(d)
 		var approvers, blockers []string
 		for _, login := range order {
@@ -373,7 +376,11 @@ func mergeBox(d *prDetail, width int, th diffTheme) []string {
 	}
 	if d.State == "OPEN" {
 		out = append(out, bs.Render("├"+strings.Repeat("─", inner)+"┤"))
-		hint := sty(th.addBar, "", true, false).Render("m") + sty(th.muted, "", false, false).Render(" merge pull request")
+		action := " merge pull request"
+		if d.IsDraft {
+			action = " mark ready for review"
+		}
+		hint := sty(th.addBar, "", true, false).Render("m") + sty(th.muted, "", false, false).Render(action)
 		out = append(out, bs.Render("│")+" "+fitWidth(hint, inner-2)+" "+bs.Render("│"))
 	}
 	return append(out, bs.Render("╰"+strings.Repeat("─", inner)+"╯"))

@@ -98,6 +98,11 @@ func mergeState(d *prDetail) (ok int, text string) {
 	return 0, "Checking whether this branch can be merged…"
 }
 
+// isDraftPR reports whether enter in the dialog should mark the PR ready instead of merging.
+func isDraftPR(d *prDetail) bool {
+	return d != nil && d.State == "OPEN" && d.IsDraft
+}
+
 // blockReason reports why enter would be refused, or "" when merging can go ahead.
 func (md *mergeDialog) blockReason(d *prDetail) string {
 	if d == nil {
@@ -126,7 +131,23 @@ type mergeDoneMsg struct {
 	pr     PR
 	method mergeMethod
 	auto   bool
+	ready  bool // marked ready for review rather than merged
 	err    error
+}
+
+func runReadyCmd(pr PR, d *prDetail) tea.Cmd {
+	return func() tea.Msg {
+		msg := mergeDoneMsg{pr: pr, ready: true}
+		if demoMode {
+			return msg
+		}
+		out, err := graphqlPOST(fmt.Sprintf(`mutation { markPullRequestReadyForReview(input: {pullRequestId: %q}) { clientMutationId } }`, d.ID))
+		if err == nil {
+			err = graphqlErrors(out)
+		}
+		msg.err = err
+		return msg
+	}
 }
 
 func runMergeCmd(pr PR, d *prDetail, md mergeDialog, method mergeMethod) tea.Cmd {
@@ -231,6 +252,10 @@ func (m model) handleMergeInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "enter":
+		if isDraftPR(d) {
+			md.saving, md.err = true, nil
+			return m, tea.Batch(runReadyCmd(v.pr, d), spinnerTick())
+		}
 		if md.blockReason(d) != "" {
 			return m, nil
 		}
@@ -256,9 +281,23 @@ func (m *model) handleMergeDone(msg mergeDoneMsg) tea.Cmd {
 	}
 	var save tea.Cmd
 	key := prKey(msg.pr)
-	if msg.auto {
+	switch {
+	case msg.ready:
+		m.actionStatus = fmt.Sprintf("✓ Marked #%d ready for review", msg.pr.Number)
+		for i := range m.prs {
+			if prKey(m.prs[i]) == key {
+				m.prs[i].IsDraft = false
+			}
+		}
+		if v != nil && prKey(v.pr) == key {
+			v.pr.IsDraft = false
+		}
+		sortPRs(m.prs) // drafts sort last
+		m.applyFilterKeepingCursor()
+		save = m.markPRsDirty()
+	case msg.auto:
 		m.actionStatus = fmt.Sprintf("✓ Auto-merge enabled for #%d (%s)", msg.pr.Number, strings.ToLower(msg.method.label))
-	} else {
+	default:
 		m.actionStatus = fmt.Sprintf("✓ Merged #%d (%s)", msg.pr.Number, strings.ToLower(msg.method.label))
 		// The list only shows open PRs; drop it now rather than waiting for the next refresh.
 		kept := m.prs[:0]
@@ -291,13 +330,29 @@ func (m model) mergeView(height int) []string {
 	text := sty(th.text, "", false, false)
 
 	band := th.band
-	left := sty(th.text, band, true, false).Render("Merge pull request")
+	title := "Merge pull request"
+	if isDraftPR(d) {
+		title = "Ready for review"
+	}
+	left := sty(th.text, band, true, false).Render(title)
 	right := sty(th.muted, band, false, false).Render(fmt.Sprintf("#%d", v.pr.Number))
 	var body []string
 
-	if d == nil {
+	switch {
+	case d == nil:
 		body = append(body, reviewRequestedStyle.Render(spinnerFrames[m.spinnerFrame]+" Loading PR..."))
-	} else {
+	case isDraftPR(d):
+		body = append(body, sty(th.threadBorder, "", true, false).Render("●")+"  "+text.Render("This pull request is still a draft"),
+			"   "+muted.Render("Mark it ready to notify reviewers and allow merging"), "")
+		switch {
+		case md.saving:
+			body = append(body, reviewRequestedStyle.Render(spinnerFrames[m.spinnerFrame]+" Marking ready..."))
+		case md.err != nil:
+			body = append(body, changesRequestedStyle.Render("Error: "+md.err.Error()))
+		default:
+			body = append(body, sty(th.addBar, "", true, false).Render("enter")+muted.Render(" mark ready for review · esc cancel"))
+		}
+	default:
 		ok, state := mergeState(d)
 		icon, color := "●", th.threadBorder
 		switch ok {
@@ -354,7 +409,9 @@ func (m model) mergeView(height int) []string {
 		}
 	}
 	border := th.addBar
-	if d != nil {
+	if isDraftPR(d) {
+		border = th.threadBorder
+	} else if d != nil {
 		if ok, _ := mergeState(d); ok < 0 {
 			border = th.delBar
 		} else if ok == 0 {

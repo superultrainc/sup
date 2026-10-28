@@ -277,6 +277,8 @@ func (m model) detailFooter() string {
 		help = " type to search · enter keep · esc cancel"
 	case v.picker != nil:
 		help = " ↑/↓ move · space toggle · type to filter · enter save · esc cancel"
+	case v.merge != nil && isDraftPR(v.detail):
+		help = " enter mark ready for review · esc cancel"
 	case v.merge != nil:
 		help = " ↑/↓ method · b delete branch · a auto-merge · enter merge · esc cancel"
 	case v.tab == tabFiles:

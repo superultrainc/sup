@@ -34,4 +34,13 @@ func TestMergeDialogRules(t *testing.T) {
 	if md.blockReason(d) == "" {
 		t.Fatal("already merged PR should be refused")
 	}
+
+	d.State, d.IsDraft = "OPEN", true
+	if !isDraftPR(d) {
+		t.Fatal("open draft should offer ready for review")
+	}
+	d.State = "CLOSED"
+	if isDraftPR(d) {
+		t.Fatal("closed draft can't be marked ready")
+	}
 }

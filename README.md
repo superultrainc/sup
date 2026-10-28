@@ -16,7 +16,7 @@ A terminal UI for browsing and checking out GitHub PRs.
 
 ## Requirements
 
-- [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`)
+- [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`). sup reads its token and talks to the GitHub API directly; `gh` itself only runs for `Enter` (checkout) and merges into repos that use a merge queue.
 
 ## Install
 
@@ -51,6 +51,8 @@ sup --mine   # Show PRs you're involved in (authored, reviewing, mentioned)
 **Zero config required** - sup automatically detects your GitHub organizations.
 
 Select a PR and press Enter to check it out locally.
+
+PRs are listed most recently updated first, with drafts at the bottom.
 
 ### Filtering
 

@@ -1,13 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -235,25 +234,33 @@ func saveReviewersCmd(pr PR, add, remove []string) tea.Cmd {
 		if demoMode {
 			return msg
 		}
-		args := []string{"pr", "edit", fmt.Sprint(pr.Number), "--repo", pr.Repository.Owner.Login + "/" + pr.Repository.Name}
+		path := fmt.Sprintf("%s/pulls/%d/requested_reviewers", repoPath(pr), pr.Number)
 		if len(add) > 0 {
-			args = append(args, "--add-reviewer", strings.Join(add, ","))
+			if _, err := githubREST("POST", path, reviewerBody(add)); err != nil {
+				msg.err = err
+				return msg
+			}
 		}
 		if len(remove) > 0 {
-			args = append(args, "--remove-reviewer", strings.Join(remove, ","))
-		}
-		cmd := exec.Command("gh", args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			text := strings.TrimSpace(stderr.String())
-			if text == "" {
-				text = err.Error()
+			if _, err := githubREST("DELETE", path, reviewerBody(remove)); err != nil {
+				msg.err = err
 			}
-			msg.err = fmt.Errorf("%s", text)
 		}
 		return msg
 	}
+}
+
+// reviewerBody splits candidate ids into users and team slugs ("org/slug").
+func reviewerBody(ids []string) map[string][]string {
+	body := map[string][]string{"reviewers": {}, "team_reviewers": {}}
+	for _, id := range ids {
+		if _, slug, ok := strings.Cut(id, "/"); ok {
+			body["team_reviewers"] = append(body["team_reviewers"], slug)
+		} else {
+			body["reviewers"] = append(body["reviewers"], id)
+		}
+	}
+	return body
 }
 
 func (m model) handlePickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -272,8 +279,14 @@ func (m model) handlePickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.picker = nil
 			return m, nil
 		}
-		p.saving = true
-		return m, tea.Batch(saveReviewersCmd(v.pr, add, remove), spinnerTick())
+		// Optimistic: show the new reviewers now; a failure refetches the truth.
+		v.picker = nil
+		if v.detail != nil {
+			applyReviewerChange(v.detail, add, remove)
+			v.applyDetail(v.detail)
+		}
+		m.actionStatus = reviewersText(add, remove)
+		return m, saveReviewersCmd(v.pr, add, remove)
 	case "up", "ctrl+p", "ctrl+k":
 		p.cursor = max(p.cursor-1, 0)
 	case "down", "ctrl+n", "ctrl+j":
@@ -302,38 +315,62 @@ func (m model) handlePickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleReviewersSaved(msg reviewersSavedMsg) tea.Cmd {
-	v := m.detail
-	if v != nil && v.picker != nil {
-		v.picker.saving = false
-	}
 	if msg.err != nil {
-		if v != nil && v.picker != nil {
-			v.picker.err = msg.err
-		} else {
-			m.actionStatus = "Error: " + msg.err.Error()
-		}
-		return nil
+		m.actionStatus = "Error: " + msg.err.Error()
 	}
-	if v != nil {
-		v.picker = nil
-	}
-	var parts []string
-	if len(msg.added) > 0 {
-		parts = append(parts, "requested "+strings.Join(msg.added, ", "))
-	}
-	if len(msg.removed) > 0 {
-		parts = append(parts, "removed "+strings.Join(msg.removed, ", "))
-	}
-	m.actionStatus = "✓ Reviewers: " + strings.Join(parts, "; ")
+	// Either way, reload so the view matches GitHub (and undoes a failed change).
 	cmds := []tea.Cmd{fetchSinglePRCmd(msg.pr)}
-	if v != nil && prKey(v.pr) == prKey(msg.pr) {
+	if v := m.detail; v != nil && prKey(v.pr) == prKey(msg.pr) {
 		e := m.cacheEntry(prKey(msg.pr))
-		e.detailAt = e.detailAt.AddDate(-1, 0, 0) // force a refetch
-		v.loading = true
+		e.detailAt = time.Time{}
 		cmds = append(cmds, m.fetchMissing(msg.pr, e)...)
-		cmds = append(cmds, spinnerTick())
 	}
 	return tea.Batch(cmds...)
+}
+
+func reviewersText(add, remove []string) string {
+	var parts []string
+	if len(add) > 0 {
+		parts = append(parts, "requested "+strings.Join(add, ", "))
+	}
+	if len(remove) > 0 {
+		parts = append(parts, "removed "+strings.Join(remove, ", "))
+	}
+	return "✓ Reviewers: " + strings.Join(parts, "; ")
+}
+
+// applyReviewerChange edits the detail's pending review requests in place.
+func applyReviewerChange(d *prDetail, add, remove []string) {
+	drop := map[string]bool{}
+	for _, id := range remove {
+		drop[id] = true
+		if _, slug, ok := strings.Cut(id, "/"); ok {
+			drop[slug] = true
+		}
+	}
+	nodes := d.ReviewRequests.Nodes[:0]
+	for _, n := range d.ReviewRequests.Nodes {
+		r := n.RequestedReviewer
+		if !drop[r.Login] && (r.Slug == "" || !drop[r.Slug]) {
+			nodes = append(nodes, n)
+		}
+	}
+	for _, id := range add {
+		var n struct {
+			RequestedReviewer struct {
+				Login string `json:"login"`
+				Name  string `json:"name"`
+				Slug  string `json:"slug"`
+			} `json:"requestedReviewer"`
+		}
+		if _, slug, ok := strings.Cut(id, "/"); ok {
+			n.RequestedReviewer.Name, n.RequestedReviewer.Slug = slug, slug
+		} else {
+			n.RequestedReviewer.Login = id
+		}
+		nodes = append(nodes, n)
+	}
+	d.ReviewRequests.Nodes = nodes
 }
 
 // pickerView renders the picker card to fill height rows.

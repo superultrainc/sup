@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"strings"
 
@@ -134,32 +135,58 @@ func runMergeCmd(pr PR, d *prDetail, md mergeDialog, method mergeMethod) tea.Cmd
 		if demoMode {
 			return msg
 		}
-		args := []string{"pr", "merge", fmt.Sprint(pr.Number), "--repo", pr.Repository.Owner.Login + "/" + pr.Repository.Name, method.flag}
-		if md.deleteBranch {
-			args = append(args, "--delete-branch")
-		}
-		if md.auto {
-			args = append(args, "--auto")
-		}
-		if md.admin {
-			args = append(args, "--admin")
-		}
-		// Refuse if commits landed after this view loaded, so nothing unreviewed merges.
-		if d.HeadRefOid != "" {
-			args = append(args, "--match-head-commit", d.HeadRefOid)
-		}
-		cmd := exec.Command("gh", args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			text := strings.TrimSpace(stderr.String())
-			if text == "" {
-				text = err.Error()
-			}
-			msg.err = fmt.Errorf("%s", text)
-		}
+		msg.err = mergePR(pr, d, md, method)
 		return msg
 	}
+}
+
+// mergePR merges through the API. Merge queues need gh's queue handling, so
+// that one case falls back to `gh pr merge`.
+func mergePR(pr PR, d *prDetail, md mergeDialog, method mergeMethod) error {
+	if md.auto {
+		out, err := graphqlPOST(fmt.Sprintf(`mutation { enablePullRequestAutoMerge(input: {pullRequestId: %q, mergeMethod: %s}) { clientMutationId } }`, d.ID, method.id))
+		if err != nil {
+			return err
+		}
+		return graphqlErrors(out)
+	}
+	// sha makes GitHub refuse if commits landed after this view loaded, so nothing unreviewed merges.
+	body := map[string]string{"merge_method": strings.ToLower(method.id), "sha": d.HeadRefOid}
+	if _, err := githubREST("PUT", fmt.Sprintf("%s/pulls/%d/merge", repoPath(pr), pr.Number), body); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "merge queue") {
+			return ghMerge(pr, d, md, method)
+		}
+		return err
+	}
+	// A fork's branch isn't ours to delete; 422 means the repo already deleted it.
+	if md.deleteBranch && !d.IsCrossRepo && d.HeadRefName != "" {
+		ref := url.PathEscape(d.HeadRefName)
+		ref = strings.ReplaceAll(ref, "%2F", "/")
+		if _, err := githubREST("DELETE", repoPath(pr)+"/git/refs/heads/"+ref, nil); err != nil && !strings.Contains(err.Error(), "Reference does not exist") {
+			return fmt.Errorf("merged, but deleting the branch failed: %w", err)
+		}
+	}
+	return nil
+}
+
+func ghMerge(pr PR, d *prDetail, md mergeDialog, method mergeMethod) error {
+	args := []string{"pr", "merge", fmt.Sprint(pr.Number), "--repo", pr.Repository.Owner.Login + "/" + pr.Repository.Name, method.flag, "--match-head-commit", d.HeadRefOid}
+	if md.deleteBranch {
+		args = append(args, "--delete-branch")
+	}
+	if md.admin {
+		args = append(args, "--admin")
+	}
+	cmd := exec.Command("gh", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if text := strings.TrimSpace(stderr.String()); text != "" {
+			return fmt.Errorf("%s", text)
+		}
+		return err
+	}
+	return nil
 }
 
 func (m model) handleMergeInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

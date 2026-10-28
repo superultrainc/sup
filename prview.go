@@ -136,6 +136,8 @@ type prDetail struct {
 	ReviewDecision string    `json:"reviewDecision"`
 	Mergeable      string    `json:"mergeable"`
 	HeadRefOid     string    `json:"headRefOid"`
+	ID             string    `json:"id"`                // node ID, for GraphQL mutations
+	IsCrossRepo    bool      `json:"isCrossRepository"` // from a fork, so its branch isn't ours to delete
 	UpdatedAt      time.Time `json:"updatedAt"`
 	// mergeStateStatus is GitHub's merge-button state: CLEAN, BLOCKED, BEHIND, DIRTY, UNSTABLE, HAS_HOOKS, DRAFT, UNKNOWN.
 	MergeStateStatus      string `json:"mergeStateStatus"`
@@ -200,7 +202,7 @@ const prDetailQuery = `{
 			title body bodyHTML url state isDraft createdAt
 			author { login }
 			baseRefName headRefName additions deletions changedFiles reviewDecision mergeable
-			headRefOid updatedAt mergeStateStatus viewerCanMergeAsAdmin
+			id isCrossRepository headRefOid updatedAt mergeStateStatus viewerCanMergeAsAdmin
 			autoMergeRequest { mergeMethod }
 			repository { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerDefaultMergeMethod }
 			labels(first: 20) { nodes { name color } }

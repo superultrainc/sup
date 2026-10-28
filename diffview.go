@@ -698,7 +698,7 @@ func fetchPRPatch(pr PR) ([]byte, error) {
 	if demoMode {
 		return []byte(mockPatch), nil
 	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", githubAPI, pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
 	get := func() (*http.Response, error) {
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {

@@ -31,7 +31,7 @@ func sampleModel() model {
 		testPR("sup", "neil", 3, false, "APPROVED", "ben"),
 		testPR("superwhisper-api", "ben", 4, false, "", "neil"),
 	}
-	return model{prs: prs, filtered: prs, statusFilterIndex: -1, repoFilterIndex: -1, repos: buildRepoList(prs)}
+	return model{prs: prs, filtered: prs, statusFilterIndex: -1, repoFilterIndex: -1, repos: buildRepoList(prs), cache: map[string]*prCacheEntry{}}
 }
 
 func numbers(prs []PR) []int {

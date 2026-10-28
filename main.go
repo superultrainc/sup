@@ -93,7 +93,7 @@ func graphqlPOST(query string) ([]byte, error) {
 
 func graphqlPOSTOnce(query string) ([]byte, int, error) {
 	body, _ := json.Marshal(map[string]string{"query": query})
-	req, err := http.NewRequest("POST", "https://api.github.com/graphql", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", githubAPI+"/graphql", bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -226,10 +226,13 @@ type PR struct {
 	HeadRefName string    `json:"headRefName"`
 	HeadRefOid  string    `json:"headRefOid"`
 	UpdatedAt   time.Time `json:"updatedAt"`
-	IsDraft     bool      `json:"isDraft"`
-	Additions   int       `json:"additions"`
-	Deletions   int       `json:"deletions"`
-	Author      struct {
+	// Partial rows came from discovery and are still missing stats and review
+	// state. It's persisted so a quit mid-refresh still refetches them.
+	Partial   bool `json:"partial,omitempty"`
+	IsDraft   bool `json:"isDraft"`
+	Additions int  `json:"additions"`
+	Deletions int  `json:"deletions"`
+	Author    struct {
 		Login string `json:"login"`
 	} `json:"author"`
 	Repository struct {
@@ -275,34 +278,28 @@ type model struct {
 	refreshing        bool   // true when fetching new data while showing cached data
 	confirmAction     string // non-empty while awaiting y/n confirmation (e.g. "approve")
 	confirmPR         *PR
-	actionPending     bool            // true while a review submission is in flight
-	actionStatus      string          // transient success/error feedback for review actions
-	helpMode          bool            // true while the help overlay is showing
-	visibleCount      int             // for animation
-	spinnerFrame      int             // for loading spinner
-	refreshSeen       map[string]bool // PR keys seen during the in-flight refresh
-	refreshID         int             // increments each refresh; stale page messages are dropped
-	pendingShards     int             // shards still streaming pages for the current refresh
-	statusFilterIndex int             // current index in statusFilters array (-1 means no filter)
-	authorFilter      string          // author filter (e.g., "!username"), empty means no author filter
-	repos             []string        // repo names present in m.prs, sorted; rebuilt on every refresh
-	repoFilterIndex   int             // current index into repos (-1 means no repo filter)
-	detail            *prDetailView   // non-nil while the full PR view is open
+	actionPending     bool              // true while a review submission is in flight
+	actionStatus      string            // transient success/error feedback for review actions
+	helpMode          bool              // true while the help overlay is showing
+	visibleCount      int               // for animation
+	spinnerFrame      int               // for loading spinner
+	refreshID         int               // increments each refresh; stale results are dropped
+	discovered        map[string]prStub // open PRs found by the in-flight refresh
+	pendingDiscover   int               // search shards still discovering
+	discoverFailed    bool              // a shard failed, so don't prune
+	pendingRows       int               // row batches still loading for the current refresh
+	lastRefresh       time.Time         // when the list was last fully refreshed
+	statusFilterIndex int               // current index in statusFilters array (-1 means no filter)
+	authorFilter      string            // author filter (e.g., "!username"), empty means no author filter
+	repos             []string          // repo names present in m.prs, sorted; rebuilt on every refresh
+	repoFilterIndex   int               // current index into repos (-1 means no repo filter)
+	detail            *prDetailView     // non-nil while the full PR view is open
 	cache             map[string]*prCacheEntry
 	hoverSeq          int // invalidates pending prefetch ticks when the cursor moves
 	warmQueue         []PR
 	warmInFlight      int
 	prsDirty          bool // list changed since the last cache write
 	prsSaveScheduled  bool
-}
-
-type prPageLoadedMsg struct {
-	prs       []PR
-	endCursor string
-	hasNext   bool
-	shardIdx  int
-	refreshID int
-	err       error
 }
 
 func prKey(pr PR) string {
@@ -437,9 +434,17 @@ var (
 				Foreground(lipgloss.Color("183"))
 )
 
-func sortPRsByOldestFirst(prs []PR) {
-	sort.Slice(prs, func(i, j int) bool {
-		return prs[i].Number < prs[j].Number
+// sortPRs puts ready PRs before drafts, most recently updated first.
+func sortPRs(prs []PR) {
+	sort.SliceStable(prs, func(i, j int) bool {
+		a, b := prs[i], prs[j]
+		if a.IsDraft != b.IsDraft {
+			return !a.IsDraft
+		}
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			return a.UpdatedAt.After(b.UpdatedAt)
+		}
+		return prKey(a) < prKey(b)
 	})
 }
 
@@ -448,7 +453,7 @@ func initialModel() model {
 	if !demoMode {
 		cached := loadCachedPRs()
 		if cached != nil {
-			sortPRsByOldestFirst(cached)
+			sortPRs(cached)
 			return model{
 				prs:               cached,
 				filtered:          cached,
@@ -544,165 +549,34 @@ func findRepoPath(repoName string) string {
 
 // getCurrentUser gets the authenticated GitHub username
 func getCurrentUser() string {
-	cmd := exec.Command("gh", "api", "user", "--jq", ".login")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(output))
+	login, _, _ := fetchViewer()
+	return login
 }
 
 // fetchUserOrgs gets the list of organizations the user belongs to
 func fetchUserOrgs() ([]string, error) {
-	cmd := exec.Command("gh", "api", "user/orgs", "--jq", ".[].login")
-	output, err := cmd.Output()
+	_, orgs, err := fetchViewer()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch orgs: %w", err)
 	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	var result []string
-	for _, line := range lines {
-		if line = strings.TrimSpace(line); line != "" {
-			result = append(result, line)
-		}
-	}
-	return result, nil
+	return orgs, nil
 }
 
-func searchShards() []string {
-	if mineMode {
-		return []string{"involves:@me is:pr is:open"}
-	}
-	var s []string
-	for _, o := range orgs {
-		s = append(s, "org:"+o+" is:pr is:open")
-	}
-	return s
+func reviewDoneText(action string, pr PR) string {
+	verb := map[string]string{"approve": "Approved", "request-changes": "Requested changes on", "comment": "Commented on"}[action]
+	return fmt.Sprintf("✓ %s PR #%d", verb, pr.Number)
 }
 
-func fetchShardPage(shardIdx int, after string, refreshID int) tea.Cmd {
-	return func() tea.Msg {
-		if demoMode {
-			return prPageLoadedMsg{prs: mockPRs(), shardIdx: shardIdx, refreshID: refreshID}
-		}
-
-		shards := searchShards()
-		if shardIdx >= len(shards) {
-			return prPageLoadedMsg{shardIdx: shardIdx, refreshID: refreshID}
-		}
-
-		afterArg := "null"
-		if after != "" {
-			afterArg = `"` + after + `"`
-		}
-
-		query := fmt.Sprintf(`{
-			search(query: "%s", type: ISSUE, first: 50, after: %s) {
-				pageInfo { endCursor hasNextPage }
-				nodes {
-					... on PullRequest {
-						number
-						title
-						headRefName
-						headRefOid
-						updatedAt
-						isDraft
-						additions
-						deletions
-						author { login }
-						repository { name owner { login } }
-						reviewDecision
-						reviewRequests(first: 5) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
-						reviews(last: 5) { nodes { author { login } state } }
-					}
-				}
-			}
-		}`, shards[shardIdx], afterArg)
-
-		output, err := graphqlPOST(query)
-		if err != nil {
-			return prPageLoadedMsg{shardIdx: shardIdx, refreshID: refreshID, err: fmt.Errorf("failed to fetch PRs: %w", err)}
-		}
-
-		var resp struct {
-			Data struct {
-				Search struct {
-					PageInfo struct {
-						EndCursor   string `json:"endCursor"`
-						HasNextPage bool   `json:"hasNextPage"`
-					} `json:"pageInfo"`
-					Nodes []PR `json:"nodes"`
-				} `json:"search"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(output, &resp); err != nil {
-			return prPageLoadedMsg{shardIdx: shardIdx, refreshID: refreshID, err: fmt.Errorf("failed to parse PRs: %w", err)}
-		}
-
-		return prPageLoadedMsg{
-			prs:       resp.Data.Search.Nodes,
-			endCursor: resp.Data.Search.PageInfo.EndCursor,
-			hasNext:   resp.Data.Search.PageInfo.HasNextPage,
-			shardIdx:  shardIdx,
-			refreshID: refreshID,
-		}
-	}
-}
-
-// startRefresh resets refresh state on the model and returns the batch of
-// commands that drive the parallel fan-out: one chain per search shard plus
-// one batched-aliases GraphQL request per chunk of already-cached PRs.
-func (m *model) startRefresh() tea.Cmd {
-	m.refreshID++
-	m.refreshSeen = make(map[string]bool)
-	shards := searchShards()
-	if len(shards) == 0 {
-		m.refreshing = false
-		return nil
-	}
-	m.pendingShards = len(shards)
-	cmds := make([]tea.Cmd, 0, len(shards)+4)
-	for i := range shards {
-		cmds = append(cmds, fetchShardPage(i, "", m.refreshID))
-	}
-
-	// Fast path: refresh cached PRs in aliased batches, in parallel, so rows
-	// update as each batch lands. Batches of 10 measured fastest (117 PRs:
-	// ~1.7s vs ~2.4s one-per-PR, and 12 requests instead of 117).
-	if !demoMode {
-		for i := 0; i < len(m.prs); i += prRefreshBatch {
-			cmds = append(cmds, fetchPRBatchCmd(m.prs[i:min(i+prRefreshBatch, len(m.prs))]))
-		}
-	}
-
-	cmds = append(cmds, spinnerTick())
-	return tea.Batch(cmds...)
-}
+var reviewEvents = map[string]string{"approve": "APPROVE", "request-changes": "REQUEST_CHANGES", "comment": "COMMENT"}
 
 func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 	return func() tea.Msg {
-		repoSlug := fmt.Sprintf("%s/%s", pr.Repository.Owner.Login, pr.Repository.Name)
-		args := []string{"pr", "review", fmt.Sprintf("%d", pr.Number), "--repo", repoSlug}
-		switch action {
-		case "approve":
-			args = append(args, "--approve")
-		case "request-changes":
-			args = append(args, "--request-changes", "--body", body)
-		case "comment":
-			args = append(args, "--comment", "--body", body)
+		review := map[string]string{"event": reviewEvents[action]}
+		if body != "" {
+			review["body"] = body
 		}
-		cmd := exec.Command("gh", args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			msg := strings.TrimSpace(stderr.String())
-			if msg == "" {
-				msg = err.Error()
-			}
-			return reviewSubmittedMsg{action: action, pr: pr, err: fmt.Errorf("%s", msg)}
-		}
-		return reviewSubmittedMsg{action: action, pr: pr}
+		_, err := githubREST("POST", fmt.Sprintf("%s/pulls/%d/reviews", repoPath(pr), pr.Number), review)
+		return reviewSubmittedMsg{action: action, pr: pr, err: err}
 	}
 }
 
@@ -715,13 +589,17 @@ const prRowFields = `number title headRefName headRefOid updatedAt isDraft addit
 const prRefreshBatch = 10
 
 type prsRefreshedMsg struct {
-	prs []PR
-	err error
+	prs       []PR
+	refreshID int // non-zero when part of a list refresh
+	err       error
 }
 
-// fetchPRBatchCmd refreshes several PRs in one GraphQL request using aliases.
-func fetchPRBatchCmd(prs []PR) tea.Cmd {
+// fetchPRBatchCmd fetches full rows for several PRs in one GraphQL request using aliases.
+func fetchPRBatchCmd(prs []PR, refreshID int) tea.Cmd {
 	return func() tea.Msg {
+		if demoMode {
+			return prsRefreshedMsg{prs: demoRows(prs), refreshID: refreshID}
+		}
 		var q strings.Builder
 		q.WriteString("{")
 		for i, p := range prs {
@@ -731,7 +609,7 @@ func fetchPRBatchCmd(prs []PR) tea.Cmd {
 		q.WriteString("}")
 		out, err := graphqlPOST(q.String())
 		if err != nil {
-			return prsRefreshedMsg{err: err}
+			return prsRefreshedMsg{refreshID: refreshID, err: err}
 		}
 		var resp struct {
 			Data map[string]*struct {
@@ -739,7 +617,7 @@ func fetchPRBatchCmd(prs []PR) tea.Cmd {
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(out, &resp); err != nil {
-			return prsRefreshedMsg{err: err}
+			return prsRefreshedMsg{refreshID: refreshID, err: err}
 		}
 		var updated []PR
 		for i, p := range prs {
@@ -752,13 +630,26 @@ func fetchPRBatchCmd(prs []PR) tea.Cmd {
 			u.Repository = p.Repository
 			updated = append(updated, u)
 		}
-		return prsRefreshedMsg{prs: updated}
+		return prsRefreshedMsg{prs: updated, refreshID: refreshID}
 	}
+}
+
+// demoRows returns the mock rows matching prs.
+func demoRows(prs []PR) []PR {
+	var out []PR
+	for _, want := range prs {
+		for _, mock := range mockPRs() {
+			if samePR(mock, want) {
+				out = append(out, mock)
+			}
+		}
+	}
+	return out
 }
 
 func fetchSinglePRCmd(pr PR) tea.Cmd {
 	return func() tea.Msg {
-		msg := fetchPRBatchCmd([]PR{pr})().(prsRefreshedMsg)
+		msg := fetchPRBatchCmd([]PR{pr}, 0)().(prsRefreshedMsg)
 		switch {
 		case msg.err != nil:
 			return prRefreshedMsg{err: msg.err}
@@ -799,15 +690,14 @@ func refreshMetaCmd() tea.Msg {
 	if demoMode {
 		return metaRefreshedMsg{orgs: orgs, currentUser: currentUser}
 	}
-	newOrgs := orgs
-	if !mineMode && os.Getenv("SUP_ORG") == "" {
-		if fetched, err := fetchUserOrgs(); err == nil && len(fetched) > 0 {
+	newOrgs, newUser := orgs, currentUser
+	if login, fetched, err := fetchViewer(); err == nil {
+		if login != "" {
+			newUser = login
+		}
+		if !mineMode && os.Getenv("SUP_ORG") == "" && len(fetched) > 0 {
 			newOrgs = fetched
 		}
-	}
-	newUser := getCurrentUser()
-	if newUser == "" {
-		newUser = currentUser
 	}
 	saveCachedMeta(metaCache{Orgs: newOrgs, CurrentUser: newUser})
 	return metaRefreshedMsg{orgs: newOrgs, currentUser: newUser}
@@ -816,7 +706,7 @@ func refreshMetaCmd() tea.Msg {
 type startRefreshMsg struct{}
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(func() tea.Msg { return startRefreshMsg{} }, refreshMetaCmd)
+	return tea.Batch(func() tea.Msg { return startRefreshMsg{} }, refreshMetaCmd, clockTick())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -891,71 +781,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case warmDoneMsg:
 		return m, m.handleWarmDone(msg)
 
-	case prPageLoadedMsg:
-		// Stale message from a prior refresh — ignore.
-		if msg.refreshID != m.refreshID {
-			return m, nil
-		}
-		if msg.err != nil {
-			if len(m.prs) == 0 {
-				m.err = msg.err
-			}
-			m.pendingShards--
-			if m.pendingShards <= 0 {
-				m.refreshing = false
-				m.loading = false
-			}
-			return m, nil
-		}
-
-		index := make(map[string]int, len(m.prs))
-		for i := range m.prs {
-			index[prKey(m.prs[i])] = i
-		}
-		for _, np := range msg.prs {
-			key := prKey(np)
-			m.refreshSeen[key] = true
-			if i, ok := index[key]; ok {
-				m.prs[i] = np
-			} else {
-				index[key] = len(m.prs)
-				m.prs = append(m.prs, np)
-			}
-		}
-
-		// If this shard has more pages, fire the next page now (don't wait for
-		// other shards). Otherwise this shard is done.
-		var next tea.Cmd
-		if msg.hasNext {
-			next = fetchShardPage(msg.shardIdx, msg.endCursor, msg.refreshID)
-		} else {
-			m.pendingShards--
-		}
-
-		// When every shard has finished, prune PRs not seen this refresh and persist.
-		if m.pendingShards <= 0 && !msg.hasNext {
-			kept := m.prs[:0]
-			for _, pr := range m.prs {
-				if m.refreshSeen[prKey(pr)] {
-					kept = append(kept, pr)
-				}
-			}
-			m.prs = kept
-			m.refreshing = false
-		}
-
-		sortPRsByOldestFirst(m.prs)
-		m.syncRepoList()
-		m.applyFilterKeepingCursor()
-
-		m.loading = false
-		m.visibleCount = len(m.filtered)
-
-		// Fresh updatedAt/head values: re-warm anything that changed.
-		if !m.refreshing {
-			return m, tea.Batch(next, m.enqueueWarm(), m.markPRsDirty())
-		}
-		return m, next
+	case discoveredMsg:
+		return m, m.handleDiscovered(msg)
 
 	case savePRsMsg:
 		m.prsSaveScheduled = false
@@ -976,7 +803,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		if m.loading || m.refreshing || m.actionPending || (m.detail != nil && (m.detail.loading || m.detail.diffLoading ||
+		// Spin only while something is missing; background refreshes stay quiet.
+		if m.loading || m.actionPending || (m.detail != nil && ((m.detail.loading && m.detail.detail == nil) || (m.detail.diffLoading && m.detail.diff == nil) ||
 			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)) ||
 			(m.detail.merge != nil && m.detail.merge.saving))) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
@@ -993,30 +821,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.actionStatus = fmt.Sprintf("%s cancelled (empty body)", msg.action)
 			return m, nil
 		}
-		m.actionPending = true
-		return m, tea.Batch(submitReviewCmd(msg.action, msg.pr, msg.body), spinnerTick())
+		m.actionStatus = reviewDoneText(msg.action, msg.pr)
+		return m, submitReviewCmd(msg.action, msg.pr, msg.body)
 
 	case reviewSubmittedMsg:
-		m.actionPending = false
 		if msg.err != nil {
 			m.actionStatus = "Error: " + msg.err.Error()
 			return m, nil
 		}
-		var verb string
-		switch msg.action {
-		case "approve":
-			verb = "Approved"
-		case "request-changes":
-			verb = "Requested changes on"
-		case "comment":
-			verb = "Commented on"
-		}
-		m.actionStatus = fmt.Sprintf("✓ %s PR #%d", verb, msg.pr.Number)
 		// Refresh just this PR so its badge reflects the new review state.
 		cmds := []tea.Cmd{fetchSinglePRCmd(msg.pr)}
 		if m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr) {
-			m.detail.loading = true
-			cmds = append(cmds, fetchPRDetailCmd(msg.pr), spinnerTick())
+			cmds = append(cmds, fetchPRDetailCmd(msg.pr))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -1037,10 +853,26 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.applyRefreshedPRs([]PR{msg.pr})
 
 	case prsRefreshedMsg:
-		if msg.err != nil {
-			return m, nil
+		return m, m.handleRowsRefreshed(msg)
+
+	case autoRefreshMsg:
+		// Only if nothing refreshed since this timer was set.
+		if msg.refreshID == m.refreshID && !m.refreshing {
+			m.refreshing = true
+			return m, m.startRefresh()
 		}
-		return m, m.applyRefreshedPRs(msg.prs)
+		return m, nil
+
+	case tea.FocusMsg:
+		if !m.refreshing && time.Since(m.lastRefresh) > focusRefreshAfter {
+			m.refreshing = true
+			return m, m.startRefresh()
+		}
+		return m, nil
+
+	case clockTickMsg:
+		// Keeps "updated Xm ago" honest while idle.
+		return m, clockTick()
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -1219,20 +1051,33 @@ func (m *model) applyFilter() {
 
 // applyFilterKeepingCursor re-filters after data changes without moving the selection.
 // applyRefreshedPRs swaps updated rows in, re-filtering once per batch.
+// applyRefreshedPRs swaps updated rows in (adding new PRs), re-filtering once per batch.
 func (m *model) applyRefreshedPRs(updated []PR) tea.Cmd {
+	added := false
 	for _, u := range updated {
+		found := false
 		for i := range m.prs {
 			if samePR(m.prs[i], u) {
 				m.prs[i] = u
+				found = true
 				break
 			}
+		}
+		if !found {
+			m.prs = append(m.prs, u)
+			added = true
 		}
 		if m.detail != nil && samePR(m.detail.pr, u) {
 			m.detail.pr = u
 		}
 	}
+	sortPRs(m.prs) // updatedAt may have moved
+	if added {
+		m.syncRepoList()
+	}
 	// Every active filter (repo, status, author) must survive the rebuild, not just typed text.
 	m.applyFilterKeepingCursor()
+	m.visibleCount = len(m.filtered)
 	return m.markPRsDirty()
 }
 
@@ -1342,9 +1187,9 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			pr := *m.confirmPR
 			m.confirmAction = ""
 			m.confirmPR = nil
-			m.actionPending = true
-			m.actionStatus = ""
-			return m, tea.Batch(submitReviewCmd(action, pr, ""), spinnerTick())
+			// Optimistic: confirm now; an error replaces this if GitHub rejects it.
+			m.actionStatus = reviewDoneText(action, pr)
+			return m, submitReviewCmd(action, pr, "")
 		default:
 			m.confirmAction = ""
 			m.confirmPR = nil
@@ -1553,12 +1398,18 @@ func (m *model) cycleStatusFilter() {
 
 // Status kinds index the badge painters; order matches statusKind.
 var (
-	badgeLabels    = [6]string{"[Draft]", "[Approved]", "[Denied]", "[Commented]", "[Review]", "[Open]"}
-	badgeColors    = [6]string{"241", "78", "196", "117", "214", "39"}
-	badgeSelColors = [6]string{"250", "114", "203", "159", "221", "81"}
+	badgeLabels    = [7]string{"[Draft]", "[Approved]", "[Denied]", "[Commented]", "[Review]", "[Open]", "[…]"}
+	badgeColors    = [7]string{"241", "78", "196", "117", "214", "39", "238"}
+	badgeSelColors = [7]string{"250", "114", "203", "159", "221", "81", "244"}
 )
 
+// statusPending is a row discovered but not yet loaded; its review state is unknown.
+const statusPending = 6
+
 func statusKind(pr PR) int {
+	if pr.Partial {
+		return statusPending
+	}
 	if pr.IsDraft {
 		return 0
 	}
@@ -1873,8 +1724,12 @@ func (m model) view() string {
 			branch, branchW := padW(truncate(pr.HeadRefName, colBranch-1), colBranch)
 			leftDiff := (colDiff - 1) / 2
 			rightDiff := colDiff - 1 - leftDiff
-			addsPadded, addsW := padLeftW("+"+strconv.Itoa(pr.Additions), leftDiff)
-			delsPadded, delsW := padLeftW("-"+strconv.Itoa(pr.Deletions), rightDiff)
+			addsText, delsText := "+"+strconv.Itoa(pr.Additions), "-"+strconv.Itoa(pr.Deletions)
+			if pr.Partial {
+				addsText, delsText = "", ""
+			}
+			addsPadded, addsW := padLeftW(addsText, leftDiff)
+			delsPadded, delsW := padLeftW(delsText, rightDiff)
 			statusW := displayWidth(label)
 			if statusW < colStatus {
 				statusW = colStatus
@@ -1924,9 +1779,8 @@ func (m model) view() string {
 		}
 		if m.confirmAction == "approve" && m.confirmPR != nil {
 			s.WriteString(lp.filter.Render(fmt.Sprintf("  Approve PR #%d? (y/n)", m.confirmPR.Number)))
-		} else if m.refreshing {
-			spinner := spinnerFrames[m.spinnerFrame]
-			s.WriteString(lp.loading.Render("  " + spinner + " Refreshing"))
+		} else if status := m.freshness(); status != "" {
+			s.WriteString(lp.dim.Render("  " + status))
 		}
 	}
 
@@ -1943,7 +1797,7 @@ type listPainters struct {
 	caret, selNormal, selAuthor, selReviewer painter
 	selBranch, selAdds, selDels              painter
 	normal, reviewer, branch, adds, dels     painter
-	badge, selBadge                          [6]painter
+	badge, selBadge                          [7]painter
 }
 
 func newListPainters() listPainters {
@@ -2150,7 +2004,7 @@ func main() {
 	go pruneImageCache()
 	detectImageMode()
 
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	finalModel, err := p.Run()
 	kittyFreeAll()
 	if fm, ok := finalModel.(model); ok && fm.prsDirty {

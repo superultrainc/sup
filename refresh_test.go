@@ -33,23 +33,31 @@ func TestRefreshFetchesOnlyChangedRows(t *testing.T) {
 	cmd := m.handleDiscovered(discoveredMsg{refreshID: m.refreshID, stubs: discovered})
 
 	// Closed #3 is pruned and new #9 shows up immediately, as a partial row.
-	if got := numbers(m.prs); len(got) != 4 || got[3] != 9 {
-		t.Fatalf("want [1 2 4 9], got %v", got)
+	byNum := func(n int) *PR {
+		for i := range m.prs {
+			if m.prs[i].Number == n {
+				return &m.prs[i]
+			}
+		}
+		return nil
 	}
-	if !m.prs[3].Partial || statusKind(m.prs[3]) != statusPending {
+	if got := numbers(m.prs); len(got) != 4 || byNum(3) != nil || byNum(9) == nil {
+		t.Fatalf("want 1, 2, 4, 9, got %v", got)
+	}
+	if !byNum(9).Partial || statusKind(*byNum(9)) != statusPending {
 		t.Fatalf("new PR should render as pending until its row loads")
 	}
 	if m.pendingRows != 1 || cmd == nil {
 		t.Fatalf("want one row batch for the two changed PRs, got %d", m.pendingRows)
 	}
 
-	updated := m.prs[1]
+	updated := *byNum(2)
 	updated.Title, updated.UpdatedAt = "updated", now.Add(time.Minute)
 	m.handleRowsRefreshed(prsRefreshedMsg{refreshID: m.refreshID, prs: []PR{updated, newPR}})
 	if m.refreshing || m.pendingRows != 0 || m.lastRefresh.IsZero() {
 		t.Fatalf("refresh should finish after the last batch")
 	}
-	if m.prs[3].Partial || m.prs[1].Title != "updated" {
+	if byNum(9).Partial || byNum(2).Title != "updated" {
 		t.Fatalf("rows should be filled in: %+v", m.prs)
 	}
 }
@@ -71,3 +79,15 @@ var errTest = &testError{}
 type testError struct{}
 
 func (*testError) Error() string { return "boom" }
+
+func TestSortDraftsLastThenRecentlyUpdated(t *testing.T) {
+	now := time.Now()
+	old, fresh, draft := testPR("a", "x", 1, false, ""), testPR("b", "x", 2, false, ""), testPR("a", "x", 3, false, "")
+	old.UpdatedAt, fresh.UpdatedAt, draft.UpdatedAt = now.Add(-time.Hour), now, now.Add(time.Hour)
+	draft.IsDraft = true
+	prs := []PR{draft, old, fresh}
+	sortPRs(prs)
+	if got := numbers(prs); got[0] != 2 || got[1] != 1 || got[2] != 3 {
+		t.Fatalf("want [2 1 3], got %v", got)
+	}
+}

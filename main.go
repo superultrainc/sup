@@ -434,9 +434,17 @@ var (
 				Foreground(lipgloss.Color("183"))
 )
 
-func sortPRsByOldestFirst(prs []PR) {
-	sort.Slice(prs, func(i, j int) bool {
-		return prs[i].Number < prs[j].Number
+// sortPRs puts ready PRs before drafts, most recently updated first.
+func sortPRs(prs []PR) {
+	sort.SliceStable(prs, func(i, j int) bool {
+		a, b := prs[i], prs[j]
+		if a.IsDraft != b.IsDraft {
+			return !a.IsDraft
+		}
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			return a.UpdatedAt.After(b.UpdatedAt)
+		}
+		return prKey(a) < prKey(b)
 	})
 }
 
@@ -445,7 +453,7 @@ func initialModel() model {
 	if !demoMode {
 		cached := loadCachedPRs()
 		if cached != nil {
-			sortPRsByOldestFirst(cached)
+			sortPRs(cached)
 			return model{
 				prs:               cached,
 				filtered:          cached,
@@ -1063,8 +1071,8 @@ func (m *model) applyRefreshedPRs(updated []PR) tea.Cmd {
 			m.detail.pr = u
 		}
 	}
+	sortPRs(m.prs) // updatedAt may have moved
 	if added {
-		sortPRsByOldestFirst(m.prs)
 		m.syncRepoList()
 	}
 	// Every active filter (repo, status, author) must survive the rebuild, not just typed text.

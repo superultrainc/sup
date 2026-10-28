@@ -221,7 +221,7 @@ func (m *model) handleDiscovered(msg discoveredMsg) tea.Cmd {
 		m.prs = kept
 	}
 	if added {
-		sortPRsByOldestFirst(m.prs)
+		sortPRs(m.prs)
 	}
 	m.syncRepoList()
 	m.applyFilterKeepingCursor()

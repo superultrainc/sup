@@ -52,6 +52,8 @@ sup --mine   # Show PRs you're involved in (authored, reviewing, mentioned)
 
 Select a PR and press Enter to check it out locally.
 
+PRs are listed most recently updated first, with drafts at the bottom.
+
 ### Filtering
 
 Repo, author/reviewer, status, and free text combine — each one narrows the list further.

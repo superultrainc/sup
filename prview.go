@@ -596,6 +596,9 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detail = nil
 		m.actionStatus = ""
 		return m, nil
+	case "?":
+		m.helpMode = true
+		return m, nil
 	case "/":
 		v.search = &detailSearch{typing: true, origin: p.scroll, current: -1}
 		return m, nil

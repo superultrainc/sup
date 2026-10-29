@@ -898,9 +898,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		}
-		if m.detail != nil {
-			return m.handleDetailInput(msg)
-		}
 		// In help overlay, only ?/esc/q dismiss; everything else is ignored.
 		if m.helpMode {
 			switch msg.String() {
@@ -908,6 +905,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.helpMode = false
 			}
 			return m, nil
+		}
+		if m.detail != nil {
+			return m.handleDetailInput(msg)
 		}
 		// Allow quitting even during animation
 		if msg.String() == "q" {
@@ -1541,10 +1541,11 @@ func (m model) helpView() string {
 	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
-	sections := []struct {
+	type section struct {
 		title string
 		items [][2]string
-	}{
+	}
+	sections := []section{
 		{"Navigation", [][2]string{
 			{"j / ↓", "Move down"},
 			{"k / ↑", "Move up"},
@@ -1579,8 +1580,44 @@ func (m model) helpView() string {
 			{"q", "Quit"},
 		}},
 	}
+	if m.detail != nil {
+		sections = []section{
+			{"Navigation", [][2]string{
+				{"j / k", "Scroll down / up"},
+				{"ctrl+d / u", "Half page down / up"},
+				{"space / ctrl+b", "Page down / up (also ctrl+f, pgdn / pgup)"},
+				{"g / G", "Top / bottom"},
+				{"tab / S-tab", "Next / previous tab"},
+				{"1-4", "Jump to tab"},
+				{"[ / ]", "Previous / next file or item"},
+				{"n / N", "Next / previous comment thread or search match"},
+				{"/", "Search"},
+			}},
+			{"Files tab", [][2]string{
+				{"d", "Go to the Files tab"},
+				{"s", "Cycle layout (auto / split / unified)"},
+				{"w", "Toggle line wrap"},
+				{"x", "Collapse / expand file"},
+			}},
+			{"Actions", [][2]string{
+				{"m", "Merge PR (or mark draft ready)"},
+				{"r", "Edit reviewers"},
+				{"A", "Approve"},
+				{"D", "Request changes"},
+				{"M", "Comment"},
+				{"o", "Open in browser"},
+				{"c", "Copy PR link"},
+				{"R", "Refresh PR"},
+			}},
+			{"Other", [][2]string{
+				{"?", "Toggle this help"},
+				{"esc / q", "Clear search, or back to list"},
+				{"ctrl+c", "Quit"},
+			}},
+		}
+	}
 
-	const keyCol = 12
+	const keyCol = 16
 	s.WriteString("\n  " + headerStyle.Render("sup — keybindings") + "\n\n")
 	for _, sec := range sections {
 		s.WriteString("  " + sectionStyle.Render(sec.title) + "\n")
@@ -1618,11 +1655,11 @@ func (m model) View() string {
 }
 
 func (m model) view() string {
-	if m.detail != nil {
-		return m.detailView()
-	}
 	if m.helpMode {
 		return m.helpView()
+	}
+	if m.detail != nil {
+		return m.detailView()
 	}
 	var s strings.Builder
 	lp := newListPainters()

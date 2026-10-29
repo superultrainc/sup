@@ -63,3 +63,14 @@ func TestDetailSearch(t *testing.T) {
 		t.Fatalf("second esc should leave the view")
 	}
 }
+
+func TestDetailHelp(t *testing.T) {
+	m := press(t, detailModel(120, 30), "?")
+	if !m.helpMode || !strings.Contains(ansi.Strip(m.View()), "Collapse / expand file") {
+		t.Fatalf("? should show the PR view shortcuts")
+	}
+	m = press(t, m, "j", "esc")
+	if m.helpMode || m.detail == nil || m.detail.pane().scroll != 0 {
+		t.Fatalf("help should swallow keys and esc should return to the PR view")
+	}
+}

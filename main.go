@@ -1961,6 +1961,12 @@ func main() {
 			demoMode = true
 		case "--mine", "-m":
 			mineMode = true
+		case "--complete":
+			printCompletions()
+			return
+		case "--zsh-completion":
+			fmt.Print(zshCompletion)
+			return
 		default:
 			pr, err := parsePRArg(arg)
 			if err != nil {

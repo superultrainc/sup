@@ -51,6 +51,11 @@ sup acme/web#42                          # Open a PR by owner/repo#number
 sup https://github.com/acme/web/pull/42  # Open a PR by URL
 ```
 
+Tab completion (zsh) suggests PRs from the last listing. `install.sh` sets it up; otherwise add this to `~/.zshrc` after `compinit`:
+```bash
+source <(sup --zsh-completion)
+```
+
 **Zero config required** - sup automatically detects your GitHub organizations.
 
 Select a PR and press Enter to check it out locally.

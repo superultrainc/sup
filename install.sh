@@ -84,5 +84,10 @@ else
     echo "Run: source $SHELL_RC"
 fi
 
+if [[ "$SHELL_NAME" == zsh ]] && ! grep -q "sup --zsh-completion" "$SHELL_RC" 2>/dev/null; then
+    echo 'source <(sup --zsh-completion)  # sup PR tab completion' >> "$SHELL_RC"
+    echo "Added tab completion to $SHELL_RC"
+fi
+
 echo ""
 echo "Done! Installed sup to $INSTALL_DIR/sup"

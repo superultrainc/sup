@@ -56,3 +56,18 @@ func slugFromRemote(url string) (string, error) {
 	return strings.TrimSuffix(strings.Trim(path, ":/"), ".git"), nil
 }
 
+// printCompletions lists cached PRs as zsh _describe entries; no network so tab stays instant.
+func printCompletions() {
+	for _, pr := range loadCachedPRs() {
+		title := strings.ReplaceAll(pr.Title, ":", `\:`)
+		fmt.Printf("%s/%s#%d:%s\n", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number, title)
+	}
+}
+
+const zshCompletion = `_sup() {
+  local -a prs
+  prs=("${(@f)$(command sup --complete 2>/dev/null)}")
+  _arguments '(-m --mine)'{-m,--mine}'[show PRs involving you]' '1:PR:{_describe PR prs}'
+}
+compdef _sup sup
+`

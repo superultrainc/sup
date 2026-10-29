@@ -24,6 +24,7 @@ var (
 	demoMode    bool     // Show mock data for screenshots
 	currentUser string   // Authenticated GitHub username
 	ghToken     string   // Cached `gh auth token` for direct HTTP calls
+	startPR     *PR      // PR named on the command line, opened on launch
 
 	httpClient = &http.Client{Timeout: 30 * time.Second, Transport: newTransport()}
 )
@@ -706,7 +707,12 @@ func refreshMetaCmd() tea.Msg {
 type startRefreshMsg struct{}
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(func() tea.Msg { return startRefreshMsg{} }, refreshMetaCmd, clockTick())
+	cmds := []tea.Cmd{func() tea.Msg { return startRefreshMsg{} }, refreshMetaCmd, clockTick()}
+	if startPR != nil {
+		pr := *startPR
+		cmds = append(cmds, func() tea.Msg { return openPRMsg{pr} })
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -844,6 +850,15 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			currentUser = msg.currentUser
 		}
 		return m, nil
+
+	case openPRMsg:
+		for _, pr := range m.prs {
+			if samePR(pr, msg.pr) {
+				return m, m.openDetail(pr)
+			}
+		}
+		// Not in the list yet: open the stub and fill in its row.
+		return m, tea.Batch(m.openDetail(msg.pr), fetchSinglePRCmd(msg.pr))
 
 	case prRefreshedMsg:
 		if msg.err != nil {
@@ -1939,14 +1954,38 @@ func stripAnsi(s string) string {
 }
 
 func main() {
-	// Parse flags
-	for _, arg := range os.Args[1:] {
+	var prArgs []string
+	for i, arg := range os.Args[1:] {
 		switch arg {
 		case "--demo":
 			demoMode = true
 		case "--mine", "-m":
 			mineMode = true
+		case "--complete":
+			repo := ""
+			if i+2 < len(os.Args) {
+				repo = os.Args[i+2]
+			}
+			meta, _ := loadCachedMeta()
+			for _, line := range completions(repo, loadCachedPRs(), meta.Orgs) {
+				fmt.Println(line)
+			}
+			return
+		case "--zsh-completion":
+			fmt.Print(zshCompletion)
+			return
+		default:
+			prArgs = append(prArgs, arg)
 		}
+	}
+	if len(prArgs) > 0 {
+		meta, _ := loadCachedMeta()
+		pr, err := parsePRArgs(prArgs, loadCachedPRs(), meta.Orgs)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		startPR = &pr
 	}
 
 	// Load gh auth token once for direct GraphQL HTTP calls.

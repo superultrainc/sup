@@ -46,6 +46,15 @@ sup() {
 ```bash
 sup          # Show PRs from your GitHub organizations (auto-detected)
 sup --mine   # Show PRs you're involved in (authored, reviewing, mentioned)
+sup 42                                   # Open PR #42 of the repo you're in
+sup acme/web#42                          # Open a PR by owner/repo#number
+sup web 42                               # Repo name or unique part of it (from listed PRs)
+sup https://github.com/acme/web/pull/42  # Open a PR by URL
+```
+
+Tab completion (zsh) suggests PRs from the last listing; `sup web <tab>` lists just that repo's PRs. `install.sh` sets it up; otherwise add this to `~/.zshrc` after `compinit`:
+```bash
+source <(sup --zsh-completion)
 ```
 
 **Zero config required** - sup automatically detects your GitHub organizations.

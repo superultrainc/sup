@@ -24,6 +24,7 @@ var (
 	demoMode    bool     // Show mock data for screenshots
 	currentUser string   // Authenticated GitHub username
 	ghToken     string   // Cached `gh auth token` for direct HTTP calls
+	startPR     *PR      // PR named on the command line, opened on launch
 
 	httpClient = &http.Client{Timeout: 30 * time.Second, Transport: newTransport()}
 )
@@ -706,7 +707,12 @@ func refreshMetaCmd() tea.Msg {
 type startRefreshMsg struct{}
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(func() tea.Msg { return startRefreshMsg{} }, refreshMetaCmd, clockTick())
+	cmds := []tea.Cmd{func() tea.Msg { return startRefreshMsg{} }, refreshMetaCmd, clockTick()}
+	if startPR != nil {
+		pr := *startPR
+		cmds = append(cmds, func() tea.Msg { return openPRMsg{pr} })
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -844,6 +850,15 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			currentUser = msg.currentUser
 		}
 		return m, nil
+
+	case openPRMsg:
+		for _, pr := range m.prs {
+			if samePR(pr, msg.pr) {
+				return m, m.openDetail(pr)
+			}
+		}
+		// Not in the list yet: open the stub and fill in its row.
+		return m, tea.Batch(m.openDetail(msg.pr), fetchSinglePRCmd(msg.pr))
 
 	case prRefreshedMsg:
 		if msg.err != nil {
@@ -1946,6 +1961,13 @@ func main() {
 			demoMode = true
 		case "--mine", "-m":
 			mineMode = true
+		default:
+			pr, err := parsePRArg(arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Error:", err)
+				os.Exit(1)
+			}
+			startPR = &pr
 		}
 	}
 

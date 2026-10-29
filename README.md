@@ -46,6 +46,9 @@ sup() {
 ```bash
 sup          # Show PRs from your GitHub organizations (auto-detected)
 sup --mine   # Show PRs you're involved in (authored, reviewing, mentioned)
+sup 42                                   # Open PR #42 of the repo you're in
+sup acme/web#42                          # Open a PR by owner/repo#number
+sup https://github.com/acme/web/pull/42  # Open a PR by URL
 ```
 
 **Zero config required** - sup automatically detects your GitHub organizations.

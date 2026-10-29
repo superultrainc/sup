@@ -251,8 +251,8 @@ func (m model) detailFooter() string {
 	v := m.detail
 	var status string
 	switch {
-	case m.confirmAction == "approve" && m.confirmPR != nil:
-		status = filterStyle.Render(fmt.Sprintf(" Approve PR #%d? (y/n)", m.confirmPR.Number))
+	case m.confirmPR != nil:
+		status = filterStyle.Render(" " + m.confirmPrompt())
 	case m.actionPending:
 		status = reviewRequestedStyle.Render(" " + spinnerFrames[m.spinnerFrame] + " Submitting review...")
 	case v.search != nil:

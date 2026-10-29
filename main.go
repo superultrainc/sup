@@ -563,6 +563,11 @@ func fetchUserOrgs() ([]string, error) {
 	return orgs, nil
 }
 
+func (m model) confirmPrompt() string {
+	verb := map[string]string{"approve": "Approve", "close": "Close"}[m.confirmAction]
+	return fmt.Sprintf("%s PR #%d? (y/n)", verb, m.confirmPR.Number)
+}
+
 func reviewDoneText(action string, pr PR) string {
 	verb := map[string]string{"approve": "Approved", "request-changes": "Requested changes on", "comment": "Commented on"}[action]
 	return fmt.Sprintf("✓ %s PR #%d", verb, pr.Number)
@@ -1202,6 +1207,9 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			pr := *m.confirmPR
 			m.confirmAction = ""
 			m.confirmPR = nil
+			if action == "close" {
+				return m, runCloseCmd(pr)
+			}
 			// Optimistic: confirm now; an error replaces this if GitHub rejects it.
 			m.actionStatus = reviewDoneText(action, pr)
 			return m, submitReviewCmd(action, pr, "")
@@ -1327,6 +1335,13 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if pr, ok := m.currentPR(); ok {
 			m.confirmAction = "approve"
+			m.confirmPR = &pr
+		}
+		return m, nil
+
+	case "X":
+		if pr, ok := m.currentPR(); ok {
+			m.confirmAction = "close"
 			m.confirmPR = &pr
 		}
 		return m, nil
@@ -1572,6 +1587,7 @@ func (m model) helpView() string {
 			{"o", "Open in browser"},
 			{"O", "Open all needing review"},
 			{"c", "Copy PR link"},
+			{"X", "Close PR"},
 		}},
 		{"Other", [][2]string{
 			{"R", "Refresh PR list"},
@@ -1607,6 +1623,7 @@ func (m model) helpView() string {
 				{"M", "Comment"},
 				{"o", "Open in browser"},
 				{"c", "Copy PR link"},
+				{"X", "Close PR"},
 				{"R", "Refresh PR"},
 			}},
 			{"Other", [][2]string{
@@ -1829,8 +1846,8 @@ func (m model) view() string {
 		} else {
 			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))
 		}
-		if m.confirmAction == "approve" && m.confirmPR != nil {
-			s.WriteString(lp.filter.Render(fmt.Sprintf("  Approve PR #%d? (y/n)", m.confirmPR.Number)))
+		if m.confirmPR != nil {
+			s.WriteString(lp.filter.Render("  " + m.confirmPrompt()))
 		} else if status := m.freshness(); status != "" {
 			s.WriteString(lp.dim.Render("  " + status))
 		}

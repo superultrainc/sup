@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
+)
 
 func TestMergeDialogRules(t *testing.T) {
 	d := &prDetail{State: "OPEN", MergeStateStatus: "CLEAN"}
@@ -42,5 +48,28 @@ func TestMergeDialogRules(t *testing.T) {
 	d.State = "CLOSED"
 	if isDraftPR(d) {
 		t.Fatal("closed draft can't be marked ready")
+	}
+}
+
+func TestClosePR(t *testing.T) {
+	demoMode = true
+	t.Cleanup(func() { demoMode = false })
+	m := detailModel(120, 30)
+	key := prKey(m.detail.pr)
+	m = press(t, m, "X")
+	if !strings.Contains(ansi.Strip(m.View()), "Close PR #") {
+		t.Fatalf("X should ask to confirm closing")
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(model)
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	for _, pr := range m.prs {
+		if prKey(pr) == key {
+			t.Fatalf("closed PR should leave the list")
+		}
+	}
+	if !strings.HasPrefix(m.actionStatus, "✓ Closed") {
+		t.Fatalf("got status %q", m.actionStatus)
 	}
 }

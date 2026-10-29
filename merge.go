@@ -132,7 +132,18 @@ type mergeDoneMsg struct {
 	method mergeMethod
 	auto   bool
 	ready  bool // marked ready for review rather than merged
+	closed bool // closed without merging
 	err    error
+}
+
+func runCloseCmd(pr PR) tea.Cmd {
+	return func() tea.Msg {
+		msg := mergeDoneMsg{pr: pr, closed: true}
+		if !demoMode {
+			_, msg.err = githubREST("PATCH", fmt.Sprintf("%s/pulls/%d", repoPath(pr), pr.Number), map[string]string{"state": "closed"})
+		}
+		return msg
+	}
 }
 
 func runReadyCmd(pr PR, d *prDetail) tea.Cmd {
@@ -298,7 +309,11 @@ func (m *model) handleMergeDone(msg mergeDoneMsg) tea.Cmd {
 	case msg.auto:
 		m.actionStatus = fmt.Sprintf("✓ Auto-merge enabled for #%d (%s)", msg.pr.Number, strings.ToLower(msg.method.label))
 	default:
-		m.actionStatus = fmt.Sprintf("✓ Merged #%d (%s)", msg.pr.Number, strings.ToLower(msg.method.label))
+		if msg.closed {
+			m.actionStatus = fmt.Sprintf("✓ Closed #%d", msg.pr.Number)
+		} else {
+			m.actionStatus = fmt.Sprintf("✓ Merged #%d (%s)", msg.pr.Number, strings.ToLower(msg.method.label))
+		}
 		// The list only shows open PRs; drop it now rather than waiting for the next refresh.
 		kept := m.prs[:0]
 		for _, pr := range m.prs {

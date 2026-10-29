@@ -20,10 +20,13 @@ func (m model) listStart() int {
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.helpMode {
+		return m, nil
+	}
 	if m.detail != nil {
 		return m.handleDetailMouse(msg)
 	}
-	if m.helpMode || m.filterMode || m.confirmAction != "" {
+	if m.filterMode || m.confirmAction != "" {
 		return m, nil
 	}
 	switch {

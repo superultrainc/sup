@@ -16,6 +16,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
 )
 
 var (
@@ -563,6 +565,11 @@ func fetchUserOrgs() ([]string, error) {
 	return orgs, nil
 }
 
+func (m model) confirmPrompt() string {
+	verb := map[string]string{"approve": "Approve", "close": "Close"}[m.confirmAction]
+	return fmt.Sprintf("%s PR #%d? (y/n)", verb, m.confirmPR.Number)
+}
+
 func reviewDoneText(action string, pr PR) string {
 	verb := map[string]string{"approve": "Approved", "request-changes": "Requested changes on", "comment": "Commented on"}[action]
 	return fmt.Sprintf("✓ %s PR #%d", verb, pr.Number)
@@ -898,9 +905,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		}
-		if m.detail != nil {
-			return m.handleDetailInput(msg)
-		}
 		// In help overlay, only ?/esc/q dismiss; everything else is ignored.
 		if m.helpMode {
 			switch msg.String() {
@@ -908,6 +912,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.helpMode = false
 			}
 			return m, nil
+		}
+		if m.detail != nil {
+			return m.handleDetailInput(msg)
 		}
 		// Allow quitting even during animation
 		if msg.String() == "q" {
@@ -1202,6 +1209,9 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			pr := *m.confirmPR
 			m.confirmAction = ""
 			m.confirmPR = nil
+			if action == "close" {
+				return m, runCloseCmd(pr)
+			}
 			// Optimistic: confirm now; an error replaces this if GitHub rejects it.
 			m.actionStatus = reviewDoneText(action, pr)
 			return m, submitReviewCmd(action, pr, "")
@@ -1327,6 +1337,13 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if pr, ok := m.currentPR(); ok {
 			m.confirmAction = "approve"
+			m.confirmPR = &pr
+		}
+		return m, nil
+
+	case "X":
+		if pr, ok := m.currentPR(); ok {
+			m.confirmAction = "close"
 			m.confirmPR = &pr
 		}
 		return m, nil
@@ -1534,17 +1551,17 @@ func getDiffStats(pr PR) string {
 }
 
 func (m model) helpView() string {
-	var s strings.Builder
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
 	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
-	sections := []struct {
+	type section struct {
 		title string
 		items [][2]string
-	}{
+	}
+	sections := []section{
 		{"Navigation", [][2]string{
 			{"j / ↓", "Move down"},
 			{"k / ↑", "Move up"},
@@ -1562,7 +1579,7 @@ func (m model) helpView() string {
 		}},
 		{"Actions", [][2]string{
 			{"Enter", "Checkout PR"},
-			{"v", "Full PR view (conversation + highlighted diff)"},
+			{"v", "Open PR view"},
 			{"m", "Merge PR (or mark draft ready)"},
 			{"d", "Open the PR's diff"},
 			{"A", "Approve"},
@@ -1571,6 +1588,7 @@ func (m model) helpView() string {
 			{"o", "Open in browser"},
 			{"O", "Open all needing review"},
 			{"c", "Copy PR link"},
+			{"X", "Close PR"},
 		}},
 		{"Other", [][2]string{
 			{"R", "Refresh PR list"},
@@ -1579,18 +1597,98 @@ func (m model) helpView() string {
 			{"q", "Quit"},
 		}},
 	}
-
-	const keyCol = 12
-	s.WriteString("\n  " + headerStyle.Render("sup — keybindings") + "\n\n")
-	for _, sec := range sections {
-		s.WriteString("  " + sectionStyle.Render(sec.title) + "\n")
-		for _, item := range sec.items {
-			s.WriteString("    " + keyStyle.Render(pad(item[0], keyCol)) + descStyle.Render(item[1]) + "\n")
+	if m.detail != nil {
+		sections = []section{
+			{"Navigation", [][2]string{
+				{"j / k", "Scroll down / up"},
+				{"ctrl+d / u", "Half page down / up"},
+				{"space / ctrl+b", "Page down / up"},
+				{"g / G", "Top / bottom"},
+				{"tab / S-tab", "Next / previous tab"},
+				{"1-4", "Jump to tab"},
+				{"[ / ]", "Previous / next file or item"},
+				{"n / N", "Next / prev comment or match"},
+				{"/", "Search"},
+			}},
+			{"Files tab", [][2]string{
+				{"d", "Go to the Files tab"},
+				{"s", "Cycle layout (auto / split / unified)"},
+				{"w", "Toggle line wrap"},
+				{"x", "Collapse / expand file"},
+			}},
+			{"Actions", [][2]string{
+				{"m", "Merge PR (or mark draft ready)"},
+				{"r", "Edit reviewers"},
+				{"A", "Approve"},
+				{"D", "Request changes"},
+				{"M", "Comment"},
+				{"o", "Open in browser"},
+				{"c", "Copy PR link"},
+				{"X", "Close PR"},
+				{"R", "Refresh PR"},
+			}},
+			{"Other", [][2]string{
+				{"?", "Toggle this help"},
+				{"esc / q", "Clear search, or back to list"},
+				{"ctrl+c", "Quit"},
+			}},
 		}
-		s.WriteString("\n")
 	}
-	s.WriteString("  " + dimStyle.Render("? · esc · q to close") + "\n")
-	return s.String()
+
+	column := func(secs []section) string {
+		keyCol := 0
+		for _, sec := range secs {
+			for _, item := range sec.items {
+				keyCol = max(keyCol, lipgloss.Width(item[0])+2)
+			}
+		}
+		var c []string
+		for i, sec := range secs {
+			if i > 0 {
+				c = append(c, "")
+			}
+			c = append(c, sectionStyle.Render(sec.title))
+			for _, item := range sec.items {
+				c = append(c, keyStyle.Render(pad(item[0], keyCol))+descStyle.Render(item[1]))
+			}
+		}
+		return strings.Join(c, "\n")
+	}
+	body := lipgloss.JoinHorizontal(lipgloss.Top, column(sections[:2]), "    ", column(sections[2:]))
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("141")).Padding(1, 2)
+	render := func(body string) string {
+		return box.Render(headerStyle.Render("Keybindings") + "\n\n" + body + "\n\n" + dimStyle.Render("? · esc · q to close"))
+	}
+	if out := render(body); lipgloss.Width(out) <= m.width || m.width == 0 {
+		return out
+	}
+	return render(column(sections)) // too narrow for two columns
+}
+
+// overlayCenter draws fg centered over bg, which is dimmed to plain text behind it.
+func overlayCenter(bg, fg string, width, height int) string {
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	bgLines := strings.Split(bg, "\n")
+	for len(bgLines) < height {
+		bgLines = append(bgLines, "")
+	}
+	fgLines := strings.Split(fg, "\n")
+	fw := lipgloss.Width(fg)
+	x, y := max((width-fw)/2, 0), max((height-len(fgLines))/2, 0)
+	for i, line := range bgLines {
+		plain := ansi.Strip(line)
+		if strings.ContainsRune(plain, '\U0010EEEE') {
+			plain = "" // kitty image placeholders mean nothing without their colors
+		}
+		if j := i - y; j >= 0 && j < len(fgLines) {
+			left := pad(runewidth.Truncate(plain, x, ""), x)
+			right := runewidth.TruncateLeft(plain, x+fw, "")
+			bgLines[i] = dim.Render(left) + fgLines[j] + dim.Render(right)
+		} else {
+			bgLines[i] = dim.Render(plain)
+		}
+	}
+	return strings.Join(bgLines, "\n")
 }
 
 // activeFilterLabels describes each active filter for the header line.
@@ -1618,11 +1716,12 @@ func (m model) View() string {
 }
 
 func (m model) view() string {
+	if m.helpMode {
+		m.helpMode = false // m is a copy; render the screen underneath
+		return overlayCenter(m.view(), m.helpView(), m.width, m.height)
+	}
 	if m.detail != nil {
 		return m.detailView()
-	}
-	if m.helpMode {
-		return m.helpView()
 	}
 	var s strings.Builder
 	lp := newListPainters()
@@ -1792,8 +1891,8 @@ func (m model) view() string {
 		} else {
 			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))
 		}
-		if m.confirmAction == "approve" && m.confirmPR != nil {
-			s.WriteString(lp.filter.Render(fmt.Sprintf("  Approve PR #%d? (y/n)", m.confirmPR.Number)))
+		if m.confirmPR != nil {
+			s.WriteString(lp.filter.Render("  " + m.confirmPrompt()))
 		} else if status := m.freshness(); status != "" {
 			s.WriteString(lp.dim.Render("  " + status))
 		}

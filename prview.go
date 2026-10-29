@@ -596,6 +596,9 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detail = nil
 		m.actionStatus = ""
 		return m, nil
+	case "?":
+		m.helpMode = true
+		return m, nil
 	case "/":
 		v.search = &detailSearch{typing: true, origin: p.scroll, current: -1}
 		return m, nil
@@ -674,7 +677,7 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(append(m.fetchMissing(v.pr, e), spinnerTick())...)
 	case "d":
 		v.tab = tabFiles
-	case "A", "D", "M", "o", "c":
+	case "A", "D", "M", "o", "c", "X":
 		return m.handleNormalInput(msg)
 	}
 	v.clampScroll(m.height)

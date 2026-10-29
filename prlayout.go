@@ -251,8 +251,8 @@ func (m model) detailFooter() string {
 	v := m.detail
 	var status string
 	switch {
-	case m.confirmAction == "approve" && m.confirmPR != nil:
-		status = filterStyle.Render(fmt.Sprintf(" Approve PR #%d? (y/n)", m.confirmPR.Number))
+	case m.confirmPR != nil:
+		status = filterStyle.Render(" " + m.confirmPrompt())
 	case m.actionPending:
 		status = reviewRequestedStyle.Render(" " + spinnerFrames[m.spinnerFrame] + " Submitting review...")
 	case v.search != nil:
@@ -282,9 +282,9 @@ func (m model) detailFooter() string {
 	case v.merge != nil:
 		help = " ↑/↓ method · b delete branch · a auto-merge · enter merge · esc cancel"
 	case v.tab == tabFiles:
-		help = " j/k scroll · / search · [/] file · n/N comment · s layout · w wrap · x collapse · tab next tab · esc back"
+		help = " ? help · j/k scroll · / search · [/] file · n/N comment · s layout · w wrap · x collapse · tab next tab · esc back"
 	default:
-		help = " j/k scroll · / search · [/] next item · tab next tab · m merge · r reviewers · A approve · D changes · M comment · o open · esc back"
+		help = " ? help · j/k scroll · / search · [/] next item · tab next tab · m merge · r reviewers · A approve · D changes · M comment · o open · esc back"
 	}
 	return status + "\n" + helpStyle.Render(truncateToWidth(help+"  "+pct, max(m.width-1, 20)))
 }

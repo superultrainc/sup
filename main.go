@@ -1954,27 +1954,38 @@ func stripAnsi(s string) string {
 }
 
 func main() {
-	// Parse flags
-	for _, arg := range os.Args[1:] {
+	var prArgs []string
+	for i, arg := range os.Args[1:] {
 		switch arg {
 		case "--demo":
 			demoMode = true
 		case "--mine", "-m":
 			mineMode = true
 		case "--complete":
-			printCompletions()
+			repo := ""
+			if i+2 < len(os.Args) {
+				repo = os.Args[i+2]
+			}
+			meta, _ := loadCachedMeta()
+			for _, line := range completions(repo, loadCachedPRs(), meta.Orgs) {
+				fmt.Println(line)
+			}
 			return
 		case "--zsh-completion":
 			fmt.Print(zshCompletion)
 			return
 		default:
-			pr, err := parsePRArg(arg)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "Error:", err)
-				os.Exit(1)
-			}
-			startPR = &pr
+			prArgs = append(prArgs, arg)
 		}
+	}
+	if len(prArgs) > 0 {
+		meta, _ := loadCachedMeta()
+		pr, err := parsePRArgs(prArgs, loadCachedPRs(), meta.Orgs)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		startPR = &pr
 	}
 
 	// Load gh auth token once for direct GraphQL HTTP calls.

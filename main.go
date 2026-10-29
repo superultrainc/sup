@@ -16,6 +16,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
 )
 
 var (
@@ -1549,7 +1551,6 @@ func getDiffStats(pr PR) string {
 }
 
 func (m model) helpView() string {
-	var s strings.Builder
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
 	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
@@ -1578,7 +1579,7 @@ func (m model) helpView() string {
 		}},
 		{"Actions", [][2]string{
 			{"Enter", "Checkout PR"},
-			{"v", "Full PR view (conversation + highlighted diff)"},
+			{"v", "Open PR view"},
 			{"m", "Merge PR (or mark draft ready)"},
 			{"d", "Open the PR's diff"},
 			{"A", "Approve"},
@@ -1601,12 +1602,12 @@ func (m model) helpView() string {
 			{"Navigation", [][2]string{
 				{"j / k", "Scroll down / up"},
 				{"ctrl+d / u", "Half page down / up"},
-				{"space / ctrl+b", "Page down / up (also ctrl+f, pgdn / pgup)"},
+				{"space / ctrl+b", "Page down / up"},
 				{"g / G", "Top / bottom"},
 				{"tab / S-tab", "Next / previous tab"},
 				{"1-4", "Jump to tab"},
 				{"[ / ]", "Previous / next file or item"},
-				{"n / N", "Next / previous comment thread or search match"},
+				{"n / N", "Next / prev comment or match"},
 				{"/", "Search"},
 			}},
 			{"Files tab", [][2]string{
@@ -1634,17 +1635,60 @@ func (m model) helpView() string {
 		}
 	}
 
-	const keyCol = 16
-	s.WriteString("\n  " + headerStyle.Render("sup — keybindings") + "\n\n")
-	for _, sec := range sections {
-		s.WriteString("  " + sectionStyle.Render(sec.title) + "\n")
-		for _, item := range sec.items {
-			s.WriteString("    " + keyStyle.Render(pad(item[0], keyCol)) + descStyle.Render(item[1]) + "\n")
+	column := func(secs []section) string {
+		keyCol := 0
+		for _, sec := range secs {
+			for _, item := range sec.items {
+				keyCol = max(keyCol, lipgloss.Width(item[0])+2)
+			}
 		}
-		s.WriteString("\n")
+		var c []string
+		for i, sec := range secs {
+			if i > 0 {
+				c = append(c, "")
+			}
+			c = append(c, sectionStyle.Render(sec.title))
+			for _, item := range sec.items {
+				c = append(c, keyStyle.Render(pad(item[0], keyCol))+descStyle.Render(item[1]))
+			}
+		}
+		return strings.Join(c, "\n")
 	}
-	s.WriteString("  " + dimStyle.Render("? · esc · q to close") + "\n")
-	return s.String()
+	body := lipgloss.JoinHorizontal(lipgloss.Top, column(sections[:2]), "    ", column(sections[2:]))
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("141")).Padding(1, 2)
+	render := func(body string) string {
+		return box.Render(headerStyle.Render("Keybindings") + "\n\n" + body + "\n\n" + dimStyle.Render("? · esc · q to close"))
+	}
+	if out := render(body); lipgloss.Width(out) <= m.width || m.width == 0 {
+		return out
+	}
+	return render(column(sections)) // too narrow for two columns
+}
+
+// overlayCenter draws fg centered over bg, which is dimmed to plain text behind it.
+func overlayCenter(bg, fg string, width, height int) string {
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	bgLines := strings.Split(bg, "\n")
+	for len(bgLines) < height {
+		bgLines = append(bgLines, "")
+	}
+	fgLines := strings.Split(fg, "\n")
+	fw := lipgloss.Width(fg)
+	x, y := max((width-fw)/2, 0), max((height-len(fgLines))/2, 0)
+	for i, line := range bgLines {
+		plain := ansi.Strip(line)
+		if strings.ContainsRune(plain, '\U0010EEEE') {
+			plain = "" // kitty image placeholders mean nothing without their colors
+		}
+		if j := i - y; j >= 0 && j < len(fgLines) {
+			left := pad(runewidth.Truncate(plain, x, ""), x)
+			right := runewidth.TruncateLeft(plain, x+fw, "")
+			bgLines[i] = dim.Render(left) + fgLines[j] + dim.Render(right)
+		} else {
+			bgLines[i] = dim.Render(plain)
+		}
+	}
+	return strings.Join(bgLines, "\n")
 }
 
 // activeFilterLabels describes each active filter for the header line.
@@ -1673,7 +1717,8 @@ func (m model) View() string {
 
 func (m model) view() string {
 	if m.helpMode {
-		return m.helpView()
+		m.helpMode = false // m is a copy; render the screen underneath
+		return overlayCenter(m.view(), m.helpView(), m.width, m.height)
 	}
 	if m.detail != nil {
 		return m.detailView()

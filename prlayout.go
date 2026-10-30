@@ -277,14 +277,10 @@ func (m model) detailFooter() string {
 		help = " type to search · enter keep · esc cancel"
 	case v.picker != nil:
 		help = " ↑/↓ move · space toggle · type to filter · enter save · esc cancel"
-	case v.merge != nil && isDraftPR(v.detail):
-		help = " enter mark ready for review · esc cancel"
 	case v.merge != nil:
 		help = " ↑/↓ method · b delete branch · a auto-merge · enter merge · esc cancel"
-	case v.tab == tabFiles:
-		help = " ? help · j/k scroll · / search · [/] file · n/N comment · s layout · w wrap · x collapse · tab next tab · esc back"
 	default:
-		help = " ? help · j/k scroll · / search · [/] next item · tab next tab · m merge · r reviewers · A approve · D changes · M comment · o open · esc back"
+		help = " ctrl+k commands · / search · tab next tab · esc back · ? help"
 	}
 	return status + "\n" + helpStyle.Render(truncateToWidth(help+"  "+pct, max(m.width-1, 20)))
 }

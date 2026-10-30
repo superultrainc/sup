@@ -299,6 +299,8 @@ func (m model) handlePickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				delete(p.selected, id)
 			}
 		}
+	case "ctrl+u": // cmd+backspace in most macOS terminals
+		p.query, p.cursor = "", 0
 	case "backspace", "ctrl+h":
 		if p.query != "" {
 			r := []rune(p.query)

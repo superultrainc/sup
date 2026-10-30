@@ -284,6 +284,7 @@ type model struct {
 	actionPending     bool              // true while a review submission is in flight
 	actionStatus      string            // transient success/error feedback for review actions
 	helpMode          bool              // true while the help overlay is showing
+	palette           *commandPalette   // non-nil while the command palette is open
 	visibleCount      int               // for animation
 	spinnerFrame      int               // for loading spinner
 	refreshID         int               // increments each refresh; stale results are dropped
@@ -566,6 +567,12 @@ func fetchUserOrgs() ([]string, error) {
 }
 
 func (m model) confirmPrompt() string {
+	switch m.confirmAction {
+	case "draft":
+		return fmt.Sprintf("Convert PR #%d to draft? (y/n)", m.confirmPR.Number)
+	case "ready":
+		return fmt.Sprintf("Mark PR #%d ready for review? (y/n)", m.confirmPR.Number)
+	}
 	verb := map[string]string{"approve": "Approve", "close": "Close"}[m.confirmAction]
 	return fmt.Sprintf("%s PR #%d? (y/n)", verb, m.confirmPR.Number)
 }
@@ -815,9 +822,16 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case paletteTickMsg:
+		if p := m.palette; p != nil && p.frame < paletteFrames {
+			p.frame++
+			return m, paletteTick()
+		}
+		return m, nil
+
 	case spinnerTickMsg:
-		// Spin only while something is missing; background refreshes stay quiet.
-		if m.loading || m.actionPending || (m.detail != nil && ((m.detail.loading && m.detail.detail == nil) || (m.detail.diffLoading && m.detail.diff == nil) ||
+		// Spin only while something is loading.
+		if m.loading || m.refreshing || m.actionPending || (m.detail != nil && ((m.detail.loading && m.detail.detail == nil) || (m.detail.diffLoading && m.detail.diff == nil) ||
 			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)) ||
 			(m.detail.merge != nil && m.detail.merge.saving))) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
@@ -905,6 +919,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		}
+		if m.palette != nil {
+			return m.handlePaletteInput(msg)
+		}
+		if msg.String() == "ctrl+k" && !m.textInputActive() {
+			m.helpMode = false
+			m.palette = &commandPalette{}
+			return m, paletteTick()
+		}
 		// In help overlay, only ?/esc/q dismiss; everything else is ignored.
 		if m.helpMode {
 			switch msg.String() {
@@ -969,6 +991,10 @@ func (m model) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	default:
 		switch msg.String() {
+		case "ctrl+u": // cmd+backspace in most macOS terminals
+			m.filterText = ""
+			m.applyFilter()
+			return m, nil
 		case "backspace", "ctrl+h", "del":
 			if len(m.filterText) > 0 {
 				m.filterText = m.filterText[:len(m.filterText)-1]
@@ -976,7 +1002,7 @@ func (m model) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if msg.Type == tea.KeyRunes {
+		if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
 			m.filterText += string(msg.Runes)
 			m.applyFilter()
 		}
@@ -1209,8 +1235,11 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			pr := *m.confirmPR
 			m.confirmAction = ""
 			m.confirmPR = nil
-			if action == "close" {
+			switch action {
+			case "close":
 				return m, runCloseCmd(pr)
+			case "draft", "ready":
+				return m, runDraftCmd(pr, action == "draft")
 			}
 			// Optimistic: confirm now; an error replaces this if GitHub rejects it.
 			m.actionStatus = reviewDoneText(action, pr)
@@ -1344,6 +1373,16 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "X":
 		if pr, ok := m.currentPR(); ok {
 			m.confirmAction = "close"
+			m.confirmPR = &pr
+		}
+		return m, nil
+
+	case "W":
+		if pr, ok := m.currentPR(); ok {
+			m.confirmAction = "draft"
+			if pr.IsDraft {
+				m.confirmAction = "ready"
+			}
 			m.confirmPR = &pr
 		}
 		return m, nil
@@ -1550,18 +1589,14 @@ func getDiffStats(pr PR) string {
 	return fmt.Sprintf("%s %s", adds, dels)
 }
 
-func (m model) helpView() string {
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+type helpSection struct {
+	title string
+	items [][2]string // key, description
+}
 
-	type section struct {
-		title string
-		items [][2]string
-	}
-	sections := []section{
+// helpSections lists the keys for the current screen; the help modal and command palette both read it.
+func (m model) helpSections() []helpSection {
+	sections := []helpSection{
 		{"Navigation", [][2]string{
 			{"j / ↓", "Move down"},
 			{"k / ↑", "Move up"},
@@ -1580,7 +1615,7 @@ func (m model) helpView() string {
 		{"Actions", [][2]string{
 			{"Enter", "Checkout PR"},
 			{"v", "Open PR view"},
-			{"m", "Merge PR (or mark draft ready)"},
+			{"m", "Merge PR"},
 			{"d", "Open the PR's diff"},
 			{"A", "Approve"},
 			{"D", "Request changes"},
@@ -1588,17 +1623,19 @@ func (m model) helpView() string {
 			{"o", "Open in browser"},
 			{"O", "Open all needing review"},
 			{"c", "Copy PR link"},
+			{"W", "Convert to draft / mark ready"},
 			{"X", "Close PR"},
 		}},
 		{"Other", [][2]string{
 			{"R", "Refresh PR list"},
 			{"?", "Toggle this help"},
+			{"ctrl+k", "Command palette"},
 			{"esc", "Clear filter (or quit)"},
 			{"q", "Quit"},
 		}},
 	}
 	if m.detail != nil {
-		sections = []section{
+		sections = []helpSection{
 			{"Navigation", [][2]string{
 				{"j / k", "Scroll down / up"},
 				{"ctrl+d / u", "Half page down / up"},
@@ -1617,25 +1654,37 @@ func (m model) helpView() string {
 				{"x", "Collapse / expand file"},
 			}},
 			{"Actions", [][2]string{
-				{"m", "Merge PR (or mark draft ready)"},
+				{"m", "Merge PR"},
 				{"r", "Edit reviewers"},
 				{"A", "Approve"},
 				{"D", "Request changes"},
 				{"M", "Comment"},
 				{"o", "Open in browser"},
 				{"c", "Copy PR link"},
+				{"W", "Convert to draft / mark ready"},
 				{"X", "Close PR"},
 				{"R", "Refresh PR"},
 			}},
 			{"Other", [][2]string{
 				{"?", "Toggle this help"},
+				{"ctrl+k", "Command palette"},
 				{"esc / q", "Clear search, or back to list"},
 				{"ctrl+c", "Quit"},
 			}},
 		}
 	}
+	return sections
+}
 
-	column := func(secs []section) string {
+func (m model) helpView() string {
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	sections := m.helpSections()
+
+	column := func(secs []helpSection) string {
 		keyCol := 0
 		for _, sec := range secs {
 			for _, item := range sec.items {
@@ -1667,6 +1716,11 @@ func (m model) helpView() string {
 
 // overlayCenter draws fg centered over bg, which is dimmed to plain text behind it.
 func overlayCenter(bg, fg string, width, height int) string {
+	return overlayAt(bg, fg, width, height, max((height-lipgloss.Height(fg))/2, 0))
+}
+
+// overlayAt draws fg horizontally centered at row y over a dimmed bg.
+func overlayAt(bg, fg string, width, height, y int) string {
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	bgLines := strings.Split(bg, "\n")
 	for len(bgLines) < height {
@@ -1674,7 +1728,7 @@ func overlayCenter(bg, fg string, width, height int) string {
 	}
 	fgLines := strings.Split(fg, "\n")
 	fw := lipgloss.Width(fg)
-	x, y := max((width-fw)/2, 0), max((height-len(fgLines))/2, 0)
+	x := max((width-fw)/2, 0)
 	for i, line := range bgLines {
 		plain := ansi.Strip(line)
 		if strings.ContainsRune(plain, '\U0010EEEE') {
@@ -1716,6 +1770,11 @@ func (m model) View() string {
 }
 
 func (m model) view() string {
+	if m.palette != nil {
+		under := m // render the screen underneath without the palette
+		under.palette = nil
+		return overlayAt(under.view(), m.paletteView(), m.width, m.height, paletteTop(m.height))
+	}
 	if m.helpMode {
 		m.helpMode = false // m is a copy; render the screen underneath
 		return overlayCenter(m.view(), m.helpView(), m.width, m.height)
@@ -1893,13 +1952,15 @@ func (m model) view() string {
 		}
 		if m.confirmPR != nil {
 			s.WriteString(lp.filter.Render("  " + m.confirmPrompt()))
+		} else if m.refreshing {
+			s.WriteString(lp.loading.Render("  " + spinnerFrames[m.spinnerFrame] + " Refreshing"))
 		} else if status := m.freshness(); status != "" {
 			s.WriteString(lp.dim.Render("  " + status))
 		}
 	}
 
 	s.WriteString("\n")
-	s.WriteString(lp.help.Render(truncateToWidth("  ?: help · /: filter · v: view · enter: checkout · q: quit", rowWidth)))
+	s.WriteString(lp.help.Render(truncateToWidth("  ctrl+k: commands · /: filter · enter: checkout · ?: help", rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()

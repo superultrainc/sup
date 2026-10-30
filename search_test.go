@@ -74,3 +74,67 @@ func TestDetailHelp(t *testing.T) {
 		t.Fatalf("help should swallow keys and esc should return to the PR view")
 	}
 }
+
+func TestCommandPalette(t *testing.T) {
+	m := detailModel(120, 30)
+	m.detail.tab = tabFiles
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	m = next.(model)
+	for cmd != nil {
+		next, cmd = m.Update(cmd())
+		m = next.(model)
+	}
+	if m.palette == nil || !strings.Contains(ansi.Strip(m.View()), "Edit reviewers") {
+		t.Fatalf("ctrl+k should open the palette with PR view commands")
+	}
+	m = press(t, m, "w", "r", "a", "p")
+	if cmds := m.paletteCommands(); len(cmds) != 1 || cmds[0].key != "w" {
+		t.Fatalf("query should narrow to the wrap command, got %+v", cmds)
+	}
+	wrap := m.detail.wrap
+	m = press(t, m, "enter")
+	if m.palette != nil || m.detail.wrap == wrap {
+		t.Fatalf("enter should close the palette and run the command")
+	}
+}
+
+func TestCtrlUClearsInputs(t *testing.T) {
+	ctrlU := tea.KeyMsg{Type: tea.KeyCtrlU}
+	m := press(t, initialModel(), "/", "a", "b")
+	next, _ := m.Update(ctrlU)
+	if m = next.(model); m.filterText != "" || !m.filterMode {
+		t.Fatalf("ctrl+u should clear the filter and keep it open, got %q", m.filterText)
+	}
+
+	m = press(t, detailModel(120, 30), "/", "a", "b")
+	next, _ = m.Update(ctrlU)
+	if m = next.(model); m.detail.search == nil || m.detail.search.query != "" {
+		t.Fatalf("ctrl+u should clear the search query")
+	}
+
+	m = detailModel(120, 30)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	m = press(t, next.(model), "a", "b")
+	next, _ = m.Update(ctrlU)
+	if m = next.(model); m.palette == nil || m.palette.query != "" {
+		t.Fatalf("ctrl+u should clear the palette query")
+	}
+}
+
+func TestSpaceInInputs(t *testing.T) {
+	space := tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+	m := press(t, initialModel(), "/", "a")
+	next, _ := m.Update(space)
+	if m = next.(model); m.filterText != "a " {
+		t.Fatalf("filter should take a space, got %q", m.filterText)
+	}
+
+	m = detailModel(120, 30)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	m = press(t, next.(model), "o", "p", "e", "n")
+	next, _ = m.Update(space)
+	m = press(t, next.(model), "i", "n")
+	if m.palette.query != "open in" || len(m.paletteCommands()) != 1 {
+		t.Fatalf("palette should take a space, got %q", m.palette.query)
+	}
+}

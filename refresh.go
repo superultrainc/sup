@@ -287,8 +287,6 @@ func clockTick() tea.Cmd {
 // freshness is the footer's quiet refresh status.
 func (m model) freshness() string {
 	switch {
-	case m.refreshing:
-		return "↻ updating"
 	case m.lastRefresh.IsZero():
 		return ""
 	case time.Since(m.lastRefresh) < time.Minute:

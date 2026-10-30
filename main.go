@@ -1960,7 +1960,7 @@ func (m model) view() string {
 	}
 
 	s.WriteString("\n")
-	s.WriteString(lp.help.Render(truncateToWidth("  ?: help · /: filter · v: view · enter: checkout · q: quit", rowWidth)))
+	s.WriteString(lp.help.Render(truncateToWidth("  ctrl+k: commands · /: filter · enter: checkout · ?: help", rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()

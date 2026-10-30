@@ -120,3 +120,21 @@ func TestCtrlUClearsInputs(t *testing.T) {
 		t.Fatalf("ctrl+u should clear the palette query")
 	}
 }
+
+func TestSpaceInInputs(t *testing.T) {
+	space := tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+	m := press(t, initialModel(), "/", "a")
+	next, _ := m.Update(space)
+	if m = next.(model); m.filterText != "a " {
+		t.Fatalf("filter should take a space, got %q", m.filterText)
+	}
+
+	m = detailModel(120, 30)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	m = press(t, next.(model), "o", "p", "e", "n")
+	next, _ = m.Update(space)
+	m = press(t, next.(model), "i", "n")
+	if m.palette.query != "open in" || len(m.paletteCommands()) != 1 {
+		t.Fatalf("palette should take a space, got %q", m.palette.query)
+	}
+}

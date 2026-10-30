@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os/exec"
@@ -98,11 +99,6 @@ func mergeState(d *prDetail) (ok int, text string) {
 	return 0, "Checking whether this branch can be merged…"
 }
 
-// isDraftPR reports whether enter in the dialog should mark the PR ready instead of merging.
-func isDraftPR(d *prDetail) bool {
-	return d != nil && d.State == "OPEN" && d.IsDraft
-}
-
 // blockReason reports why enter would be refused, or "" when merging can go ahead.
 func (md *mergeDialog) blockReason(d *prDetail) string {
 	if d == nil {
@@ -111,14 +107,15 @@ func (md *mergeDialog) blockReason(d *prDetail) string {
 	if d.State != "OPEN" {
 		return "This pull request is " + strings.ToLower(d.State)
 	}
+	if d.IsDraft {
+		return "Draft: press W to mark it ready for review first"
+	}
 	if _, ok := md.selectedMethod(d); !ok {
 		return "This repository doesn't allow any merge method you can use"
 	}
 	switch d.MergeStateStatus {
 	case "DIRTY":
 		return "Resolve conflicts before merging"
-	case "DRAFT":
-		return "Mark this pull request ready for review before merging"
 	case "BLOCKED":
 		if !md.auto && !md.admin {
 			return "Blocked: enable auto-merge (a) or bypass as admin (!)"
@@ -132,6 +129,7 @@ type mergeDoneMsg struct {
 	method mergeMethod
 	auto   bool
 	ready  bool // marked ready for review rather than merged
+	draft  bool // converted back to a draft
 	closed bool // closed without merging
 	err    error
 }
@@ -146,13 +144,36 @@ func runCloseCmd(pr PR) tea.Cmd {
 	}
 }
 
-func runReadyCmd(pr PR, d *prDetail) tea.Cmd {
+// runDraftCmd converts pr to a draft, or marks it ready for review when draft is false.
+func runDraftCmd(pr PR, draft bool) tea.Cmd {
 	return func() tea.Msg {
-		msg := mergeDoneMsg{pr: pr, ready: true}
+		msg := mergeDoneMsg{pr: pr, draft: draft, ready: !draft}
 		if demoMode {
 			return msg
 		}
-		out, err := graphqlPOST(fmt.Sprintf(`mutation { markPullRequestReadyForReview(input: {pullRequestId: %q}) { clientMutationId } }`, d.ID))
+		// List rows don't carry the node ID the mutation needs.
+		out, err := graphqlPOST(fmt.Sprintf(`query { repository(owner: %q, name: %q) { pullRequest(number: %d) { id } } }`,
+			pr.Repository.Owner.Login, pr.Repository.Name, pr.Number))
+		var r struct {
+			Data struct {
+				Repository struct {
+					PullRequest struct{ ID string } `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+		}
+		if err == nil {
+			err = graphqlErrors(out)
+		}
+		if err == nil {
+			err = json.Unmarshal(out, &r)
+		}
+		if err == nil {
+			mutation := "markPullRequestReadyForReview"
+			if draft {
+				mutation = "convertPullRequestToDraft"
+			}
+			out, err = graphqlPOST(fmt.Sprintf(`mutation { %s(input: {pullRequestId: %q}) { clientMutationId } }`, mutation, r.Data.Repository.PullRequest.ID))
+		}
 		if err == nil {
 			err = graphqlErrors(out)
 		}
@@ -263,10 +284,6 @@ func (m model) handleMergeInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "enter":
-		if isDraftPR(d) {
-			md.saving, md.err = true, nil
-			return m, tea.Batch(runReadyCmd(v.pr, d), spinnerTick())
-		}
 		if md.blockReason(d) != "" {
 			return m, nil
 		}
@@ -293,15 +310,18 @@ func (m *model) handleMergeDone(msg mergeDoneMsg) tea.Cmd {
 	var save tea.Cmd
 	key := prKey(msg.pr)
 	switch {
-	case msg.ready:
+	case msg.ready, msg.draft:
 		m.actionStatus = fmt.Sprintf("✓ Marked #%d ready for review", msg.pr.Number)
+		if msg.draft {
+			m.actionStatus = fmt.Sprintf("✓ Converted #%d to draft", msg.pr.Number)
+		}
 		for i := range m.prs {
 			if prKey(m.prs[i]) == key {
-				m.prs[i].IsDraft = false
+				m.prs[i].IsDraft = msg.draft
 			}
 		}
 		if v != nil && prKey(v.pr) == key {
-			v.pr.IsDraft = false
+			v.pr.IsDraft = msg.draft
 		}
 		sortPRs(m.prs) // drafts sort last
 		m.applyFilterKeepingCursor()
@@ -345,28 +365,13 @@ func (m model) mergeView(height int) []string {
 	text := sty(th.text, "", false, false)
 
 	band := th.band
-	title := "Merge pull request"
-	if isDraftPR(d) {
-		title = "Ready for review"
-	}
-	left := sty(th.text, band, true, false).Render(title)
+	left := sty(th.text, band, true, false).Render("Merge pull request")
 	right := sty(th.muted, band, false, false).Render(fmt.Sprintf("#%d", v.pr.Number))
 	var body []string
 
 	switch {
 	case d == nil:
 		body = append(body, reviewRequestedStyle.Render(spinnerFrames[m.spinnerFrame]+" Loading PR..."))
-	case isDraftPR(d):
-		body = append(body, sty(th.threadBorder, "", true, false).Render("●")+"  "+text.Render("This pull request is still a draft"),
-			"   "+muted.Render("Mark it ready to notify reviewers and allow merging"), "")
-		switch {
-		case md.saving:
-			body = append(body, reviewRequestedStyle.Render(spinnerFrames[m.spinnerFrame]+" Marking ready..."))
-		case md.err != nil:
-			body = append(body, changesRequestedStyle.Render("Error: "+md.err.Error()))
-		default:
-			body = append(body, sty(th.addBar, "", true, false).Render("enter")+muted.Render(" mark ready for review · esc cancel"))
-		}
 	default:
 		ok, state := mergeState(d)
 		icon, color := "●", th.threadBorder
@@ -424,9 +429,7 @@ func (m model) mergeView(height int) []string {
 		}
 	}
 	border := th.addBar
-	if isDraftPR(d) {
-		border = th.threadBorder
-	} else if d != nil {
+	if d != nil {
 		if ok, _ := mergeState(d); ok < 0 {
 			border = th.delBar
 		} else if ok == 0 {

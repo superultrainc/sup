@@ -89,10 +89,12 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `c` | Copy PR link to clipboard |
 | `v` | Full PR view: conversation (description, checks, reviews, comments) and a syntax-highlighted diff with review threads inline |
 | `d` | Open the PR view on its diff (Files changed tab) |
-| `m` | Merge PR: pick squash / merge commit / rebase, delete the branch, or enable auto-merge. On a draft, marks it ready for review |
+| `m` | Merge PR: pick squash / merge commit / rebase, delete the branch, or enable auto-merge |
 | `A` | Approve PR (with `y`/`n` confirm) |
 | `D` | Request changes — opens `$EDITOR` for body |
 | `M` | Comment on PR — opens `$EDITOR` for body |
+| `W` | Convert PR to a draft, or mark a draft ready for review (with `y`/`n` confirm) |
+| `X` | Close PR (with `y`/`n` confirm) |
 | `Enter` | Checkout PR |
 | `?` | Toggle full help overlay |
 | `q` / `Esc` | Quit |
@@ -116,12 +118,12 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `w` | Toggle line wrapping |
 | `x` | Collapse / expand the current file |
 | `r` | Request or remove reviewers (type to filter, `space` toggles, `enter` saves) |
-| `m` | Merge (`↑`/`↓` method, `b` delete branch, `a` auto-merge, `!` admin bypass when allowed). On a draft, `enter` marks it ready for review |
+| `m` | Merge (`↑`/`↓` method, `b` delete branch, `a` auto-merge, `!` admin bypass when allowed) |
 | `d` | Jump to Files changed |
 | `R` | Reload |
 | `esc` | Back to the list |
 
-`A`, `D`, `M`, `o`, and `c` work from here too.
+`A`, `D`, `M`, `W`, `X`, `o`, and `c` work from here too.
 
 The mouse works too: click a tab to switch, click a file in the tree to jump to it, and scroll with the wheel. In the list, click a PR to select it and click it again to open it. Hold Option (or Shift, depending on your terminal) to select text.
 

@@ -566,6 +566,12 @@ func fetchUserOrgs() ([]string, error) {
 }
 
 func (m model) confirmPrompt() string {
+	switch m.confirmAction {
+	case "draft":
+		return fmt.Sprintf("Convert PR #%d to draft? (y/n)", m.confirmPR.Number)
+	case "ready":
+		return fmt.Sprintf("Mark PR #%d ready for review? (y/n)", m.confirmPR.Number)
+	}
 	verb := map[string]string{"approve": "Approve", "close": "Close"}[m.confirmAction]
 	return fmt.Sprintf("%s PR #%d? (y/n)", verb, m.confirmPR.Number)
 }
@@ -1209,8 +1215,11 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			pr := *m.confirmPR
 			m.confirmAction = ""
 			m.confirmPR = nil
-			if action == "close" {
+			switch action {
+			case "close":
 				return m, runCloseCmd(pr)
+			case "draft", "ready":
+				return m, runDraftCmd(pr, action == "draft")
 			}
 			// Optimistic: confirm now; an error replaces this if GitHub rejects it.
 			m.actionStatus = reviewDoneText(action, pr)
@@ -1344,6 +1353,16 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "X":
 		if pr, ok := m.currentPR(); ok {
 			m.confirmAction = "close"
+			m.confirmPR = &pr
+		}
+		return m, nil
+
+	case "W":
+		if pr, ok := m.currentPR(); ok {
+			m.confirmAction = "draft"
+			if pr.IsDraft {
+				m.confirmAction = "ready"
+			}
 			m.confirmPR = &pr
 		}
 		return m, nil
@@ -1580,7 +1599,7 @@ func (m model) helpView() string {
 		{"Actions", [][2]string{
 			{"Enter", "Checkout PR"},
 			{"v", "Open PR view"},
-			{"m", "Merge PR (or mark draft ready)"},
+			{"m", "Merge PR"},
 			{"d", "Open the PR's diff"},
 			{"A", "Approve"},
 			{"D", "Request changes"},
@@ -1588,6 +1607,7 @@ func (m model) helpView() string {
 			{"o", "Open in browser"},
 			{"O", "Open all needing review"},
 			{"c", "Copy PR link"},
+			{"W", "Convert to draft / mark ready"},
 			{"X", "Close PR"},
 		}},
 		{"Other", [][2]string{
@@ -1617,13 +1637,14 @@ func (m model) helpView() string {
 				{"x", "Collapse / expand file"},
 			}},
 			{"Actions", [][2]string{
-				{"m", "Merge PR (or mark draft ready)"},
+				{"m", "Merge PR"},
 				{"r", "Edit reviewers"},
 				{"A", "Approve"},
 				{"D", "Request changes"},
 				{"M", "Comment"},
 				{"o", "Open in browser"},
 				{"c", "Copy PR link"},
+				{"W", "Convert to draft / mark ready"},
 				{"X", "Close PR"},
 				{"R", "Refresh PR"},
 			}},

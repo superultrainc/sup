@@ -991,6 +991,10 @@ func (m model) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	default:
 		switch msg.String() {
+		case "ctrl+u": // cmd+backspace in most macOS terminals
+			m.filterText = ""
+			m.applyFilter()
+			return m, nil
 		case "backspace", "ctrl+h", "del":
 			if len(m.filterText) > 0 {
 				m.filterText = m.filterText[:len(m.filterText)-1]

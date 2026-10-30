@@ -97,3 +97,26 @@ func TestCommandPalette(t *testing.T) {
 		t.Fatalf("enter should close the palette and run the command")
 	}
 }
+
+func TestCtrlUClearsInputs(t *testing.T) {
+	ctrlU := tea.KeyMsg{Type: tea.KeyCtrlU}
+	m := press(t, initialModel(), "/", "a", "b")
+	next, _ := m.Update(ctrlU)
+	if m = next.(model); m.filterText != "" || !m.filterMode {
+		t.Fatalf("ctrl+u should clear the filter and keep it open, got %q", m.filterText)
+	}
+
+	m = press(t, detailModel(120, 30), "/", "a", "b")
+	next, _ = m.Update(ctrlU)
+	if m = next.(model); m.detail.search == nil || m.detail.search.query != "" {
+		t.Fatalf("ctrl+u should clear the search query")
+	}
+
+	m = detailModel(120, 30)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	m = press(t, next.(model), "a", "b")
+	next, _ = m.Update(ctrlU)
+	if m = next.(model); m.palette == nil || m.palette.query != "" {
+		t.Fatalf("ctrl+u should clear the palette query")
+	}
+}

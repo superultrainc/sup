@@ -80,6 +80,8 @@ func (m model) handlePaletteInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		p.cursor = max(p.cursor-1, 0)
 	case "down", "ctrl+n", "ctrl+j":
 		p.cursor = min(p.cursor+1, max(len(cmds)-1, 0))
+	case "ctrl+u": // cmd+backspace in most macOS terminals
+		p.query, p.cursor = "", 0
 	case "backspace", "ctrl+h":
 		if p.query != "" {
 			r := []rune(p.query)

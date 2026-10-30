@@ -108,6 +108,8 @@ func (m model) handleSearchInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.search = nil
 		}
 		return m, nil
+	case tea.KeyCtrlU: // cmd+backspace in most macOS terminals
+		s.query = ""
 	case tea.KeyBackspace:
 		if s.query != "" {
 			r := []rune(s.query)

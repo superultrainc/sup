@@ -816,8 +816,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		// Spin only while something is missing; background refreshes stay quiet.
-		if m.loading || m.actionPending || (m.detail != nil && ((m.detail.loading && m.detail.detail == nil) || (m.detail.diffLoading && m.detail.diff == nil) ||
+		// Spin only while something is loading.
+		if m.loading || m.refreshing || m.actionPending || (m.detail != nil && ((m.detail.loading && m.detail.detail == nil) || (m.detail.diffLoading && m.detail.diff == nil) ||
 			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)) ||
 			(m.detail.merge != nil && m.detail.merge.saving))) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
@@ -1893,6 +1893,8 @@ func (m model) view() string {
 		}
 		if m.confirmPR != nil {
 			s.WriteString(lp.filter.Render("  " + m.confirmPrompt()))
+		} else if m.refreshing {
+			s.WriteString(lp.loading.Render("  " + spinnerFrames[m.spinnerFrame] + " Refreshing"))
 		} else if status := m.freshness(); status != "" {
 			s.WriteString(lp.dim.Render("  " + status))
 		}

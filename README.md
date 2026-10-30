@@ -97,7 +97,10 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `X` | Close PR (with `y`/`n` confirm) |
 | `Enter` | Checkout PR |
 | `?` | Toggle full help overlay |
+| `ctrl+k` | Command palette: type to find any action, `enter` runs it (works in the PR view too) |
 | `q` / `Esc` | Quit |
+
+Terminals don't pass `Cmd` to TUI apps, so to use `Cmd+K` map it to `ctrl+k` in your terminal. Ghostty: `keybind = cmd+k=text:\x0b`. kitty: `map cmd+k send_text all \x0b`.
 
 ### PR view
 

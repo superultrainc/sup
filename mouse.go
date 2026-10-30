@@ -20,7 +20,7 @@ func (m model) listStart() int {
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.helpMode {
+	if m.helpMode || m.palette != nil {
 		return m, nil
 	}
 	if m.detail != nil {

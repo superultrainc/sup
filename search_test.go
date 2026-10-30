@@ -74,3 +74,26 @@ func TestDetailHelp(t *testing.T) {
 		t.Fatalf("help should swallow keys and esc should return to the PR view")
 	}
 }
+
+func TestCommandPalette(t *testing.T) {
+	m := detailModel(120, 30)
+	m.detail.tab = tabFiles
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	m = next.(model)
+	for cmd != nil {
+		next, cmd = m.Update(cmd())
+		m = next.(model)
+	}
+	if m.palette == nil || !strings.Contains(ansi.Strip(m.View()), "Edit reviewers") {
+		t.Fatalf("ctrl+k should open the palette with PR view commands")
+	}
+	m = press(t, m, "w", "r", "a", "p")
+	if cmds := m.paletteCommands(); len(cmds) != 1 || cmds[0].key != "w" {
+		t.Fatalf("query should narrow to the wrap command, got %+v", cmds)
+	}
+	wrap := m.detail.wrap
+	m = press(t, m, "enter")
+	if m.palette != nil || m.detail.wrap == wrap {
+		t.Fatalf("enter should close the palette and run the command")
+	}
+}

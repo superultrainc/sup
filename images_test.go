@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -99,5 +100,19 @@ func TestPruneImageCache(t *testing.T) {
 	}
 	if _, err := os.Stat(newF); err != nil {
 		t.Fatal("new file should stay")
+	}
+}
+
+func TestRawFileURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://github.com/o/r/blob/pr-assets/x/before/a.png?raw=true": "https://raw.githubusercontent.com/o/r/pr-assets/x/before/a.png",
+		"https://github.com/o/r/raw/main/a.gif":                         "https://raw.githubusercontent.com/o/r/main/a.gif",
+		"https://github.com/user-attachments/assets/abc":                "https://github.com/user-attachments/assets/abc",
+		"https://example.com/o/r/blob/main/a.png":                       "https://example.com/o/r/blob/main/a.png",
+	} {
+		u, _ := url.Parse(in)
+		if got := rawFileURL(u).String(); got != want {
+			t.Errorf("%s: got %s, want %s", in, got, want)
+		}
 	}
 }

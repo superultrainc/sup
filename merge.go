@@ -137,7 +137,9 @@ type mergeDoneMsg struct {
 func runCloseCmd(pr PR) tea.Cmd {
 	return func() tea.Msg {
 		msg := mergeDoneMsg{pr: pr, closed: true}
-		if !demoMode {
+		if demoMode {
+			demoActions.Store(prKey(pr), "closed")
+		} else {
 			_, msg.err = githubREST("PATCH", fmt.Sprintf("%s/pulls/%d", repoPath(pr), pr.Number), map[string]string{"state": "closed"})
 		}
 		return msg
@@ -149,6 +151,7 @@ func runDraftCmd(pr PR, draft bool) tea.Cmd {
 	return func() tea.Msg {
 		msg := mergeDoneMsg{pr: pr, draft: draft, ready: !draft}
 		if demoMode {
+			demoActions.Store(prKey(pr), map[bool]string{true: "draft", false: "ready"}[draft])
 			return msg
 		}
 		// List rows don't carry the node ID the mutation needs.
@@ -186,6 +189,9 @@ func runMergeCmd(pr PR, d *prDetail, md mergeDialog, method mergeMethod) tea.Cmd
 	return func() tea.Msg {
 		msg := mergeDoneMsg{pr: pr, method: method, auto: md.auto}
 		if demoMode {
+			if !md.auto {
+				demoActions.Store(prKey(pr), "merged")
+			}
 			return msg
 		}
 		msg.err = mergePR(pr, d, md, method)

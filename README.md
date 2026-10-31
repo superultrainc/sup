@@ -16,7 +16,7 @@ A terminal UI for browsing and checking out GitHub PRs.
 
 ## Requirements
 
-- [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`). sup reads its token and talks to the GitHub API directly; `gh` itself only runs for `Enter` (checkout) and merges into repos that use a merge queue.
+- [gh](https://cli.github.com/) CLI (authenticated via `gh auth login`). sup reads its token and talks to the GitHub API directly; `gh` itself only runs for checkout and merges into repos that use a merge queue.
 
 ## Install
 
@@ -59,7 +59,7 @@ source <(sup --zsh-completion)
 
 **Zero config required** - sup automatically detects your GitHub organizations.
 
-Select a PR and press Enter to check it out locally.
+Select a PR and press Enter to open it. To check it out locally, pick "Checkout PR" from the `ctrl+k` palette.
 
 PRs are listed most recently updated first, with drafts at the bottom.
 
@@ -79,6 +79,7 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `k` / `↑` | Move up |
 | `g` | Go to top |
 | `G` | Go to bottom |
+| `space` | Preview pane: the list narrows to the left and the selected PR's Conversation tab shows on the right. `ctrl+d` / `ctrl+u` or the mouse wheel scroll it, clicking it opens the full PR view. Needs a terminal at least 100 columns wide |
 | `/` | Filter PRs (prefix `#` repo, `@` reviewer, `!` author) |
 | `s` | Cycle status filter |
 | `p` / `P` | Cycle repo filter (forward / back) |
@@ -95,7 +96,6 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `M` | Comment on PR — opens `$EDITOR` for body |
 | `W` | Convert PR to a draft, or mark a draft ready for review (with `y`/`n` confirm) |
 | `X` | Close PR (with `y`/`n` confirm) |
-| `Enter` | Checkout PR |
 | `?` | Toggle full help overlay |
 | `ctrl+k` | Command palette: type to find any action, `enter` runs it (works in the PR view too) |
 | `q` / `Esc` | Quit |

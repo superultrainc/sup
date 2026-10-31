@@ -231,6 +231,10 @@ const prDetailQuery = `{
 
 func fetchPRDetail(pr PR) (*prDetail, error) {
 	if demoMode {
+		// Build from the full demo row; pr may be a still-loading stub.
+		if rows := demoRows([]PR{pr}); len(rows) > 0 {
+			pr = rows[0]
+		}
 		return mockPRDetail(pr), nil
 	}
 	out, err := graphqlPOST(fmt.Sprintf(prDetailQuery, pr.Repository.Owner.Login, pr.Repository.Name, pr.Number))
@@ -702,13 +706,17 @@ func mockPRDetail(pr PR) *prDetail {
 		ReviewDecision: pr.ReviewDecision,
 		Mergeable:      "MERGEABLE",
 	}
+	d.UpdatedAt = pr.UpdatedAt // keeps the demo cache fresh
+	if dp, ok := findDemoPR(pr); ok {
+		d.Body = "## Summary\n\n" + dp.summary + "\n\n## Test plan\n\n- [x] `make test`\n- [ ] Manual QA on staging"
+	}
 	d.Commits.TotalCount = 3
 	d.HeadRefOid, d.MergeStateStatus = "c7d8e9f", "CLEAN"
 	d.Repository.SquashMergeAllowed, d.Repository.MergeCommitAllowed = true, true
 	d.Repository.ViewerDefaultMergeMethod = "SQUASH"
 	d.Labels.Nodes = []prLabel{{"enhancement", "a2eeef"}, {"backend", "5319e7"}}
 	d.Assignees.Nodes = []ghActor{{pr.Author.Login}}
-	for i, h := range []string{"Validate Config in NewThing", "Add NewThing tests", "Wrap /things in a 5s timeout"} {
+	for i, h := range []string{pr.Title, "Add tests", "Address review feedback"} {
 		var c prCommit
 		c.Commit.AbbreviatedOid = []string{"a1b2c3d", "e4f5a6b", "c7d8e9f"}[i]
 		c.Commit.MessageHeadline = h
@@ -737,8 +745,8 @@ func mockPRDetail(pr PR) *prDetail {
 	}{})
 	d.Commits.Nodes[0].Commit.StatusCheckRollup = rollup
 	d.Comments.Nodes = []prComment{
-		{Author: ghActor{"mike"}, Body: "Nice. Does this need a migration?", CreatedAt: now.Add(-48 * time.Hour)},
-		{Author: ghActor{pr.Author.Login}, Body: "Nope, no schema changes.", CreatedAt: now.Add(-47 * time.Hour)},
+		{Author: ghActor{"mike"}, Body: "Nice. Anything I should check by hand?", CreatedAt: now.Add(-48 * time.Hour)},
+		{Author: ghActor{pr.Author.Login}, Body: "Just the steps in the test plan.", CreatedAt: now.Add(-47 * time.Hour)},
 	}
 	d.Reviews.Nodes = []prReview{
 		{Author: ghActor{"mike"}, State: "APPROVED", Body: "LGTM 🚀", SubmittedAt: now.Add(-20 * time.Hour)},
@@ -756,6 +764,30 @@ func mockPRDetail(pr PR) *prDetail {
 			DiffHunk: "@@ -0,0 +1,6 @@\n+package thing\n+\n+import \"testing\"\n+\n+func TestNewThing(t *testing.T) {\n+\tif _, err := NewThing(Config{}); err == nil {"},
 	}
 	d.ReviewThreads.Nodes = []reviewThread{t1, t2}
+
+	// Reviews, checks and merge state follow the row's status.
+	reviewer := "mike"
+	if len(pr.Reviews.Nodes) > 0 {
+		reviewer = pr.Reviews.Nodes[0].Author.Login
+	} else if len(pr.ReviewRequests.Nodes) > 0 {
+		reviewer = pr.ReviewRequests.Nodes[0].RequestedReviewer.Login
+	}
+	switch statusLabelForFilter(pr) {
+	case "denied":
+		d.Reviews.Nodes = []prReview{{Author: ghActor{reviewer}, State: "CHANGES_REQUESTED", Body: "A couple of things before this goes in, see the inline comments.", SubmittedAt: now.Add(-3 * time.Hour)}}
+		d.MergeStateStatus = "BLOCKED"
+		rollup.State, rollup.Contexts.Nodes[1].Conclusion = "FAILURE", "FAILURE"
+	case "commented":
+		d.Reviews.Nodes = []prReview{{Author: ghActor{reviewer}, State: "COMMENTED", Body: "Left a question inline, otherwise looks good.", SubmittedAt: now.Add(-5 * time.Hour)}}
+		d.MergeStateStatus = "BLOCKED"
+	case "review", "open":
+		d.Reviews.Nodes = nil
+		d.MergeStateStatus = "BLOCKED"
+	case "draft":
+		d.Reviews.Nodes = nil
+		d.MergeStateStatus = "DRAFT"
+		rollup.State, rollup.Contexts.Nodes[2].Conclusion, rollup.Contexts.Nodes[2].Status = "PENDING", "", "IN_PROGRESS"
+	}
 	return d
 }
 

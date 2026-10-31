@@ -107,6 +107,9 @@ func discoverCmd(query string, refreshID int) tea.Cmd {
 		if demoMode {
 			var stubs []prStub
 			for _, pr := range mockPRs() {
+				if demoGone(pr) {
+					continue
+				}
 				var s prStub
 				s.Number, s.Repository.Name, s.Repository.Owner.Login = pr.Number, pr.Repository.Name, pr.Repository.Owner.Login
 				stubs = append(stubs, s)
@@ -248,6 +251,9 @@ func (m *model) handleRowsRefreshed(msg prsRefreshedMsg) tea.Cmd {
 	var cmds []tea.Cmd
 	if msg.err == nil {
 		cmds = append(cmds, m.applyRefreshedPRs(msg.prs))
+		if demoMode {
+			m.demoPrefill()
+		}
 	}
 	if msg.refreshID != 0 && msg.refreshID == m.refreshID {
 		m.loading = false

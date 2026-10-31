@@ -20,7 +20,7 @@ type commandPalette struct {
 
 type paletteCommand struct {
 	key, desc, section string
-	msg                tea.KeyMsg
+	msg                tea.Msg
 }
 
 // keyMsgFor turns a help-list key into the key press it stands for. Multi-key
@@ -31,6 +31,8 @@ func keyMsgFor(key string) (tea.KeyMsg, bool) {
 		return tea.KeyMsg{Type: tea.KeyEnter}, true
 	case "esc":
 		return tea.KeyMsg{Type: tea.KeyEsc}, true
+	case "space":
+		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}, true
 	case "ctrl+c":
 		return tea.KeyMsg{Type: tea.KeyCtrlC}, true
 	}
@@ -52,9 +54,15 @@ func (m model) paletteCommands() []paletteCommand {
 				out = append(out, paletteCommand{item[0], item[1], sec.title, msg})
 			}
 		}
+		if sec.title == "Actions" && strings.Contains("checkout pr actions", q) {
+			out = append(out, paletteCommand{"", "Checkout PR", sec.title, checkoutMsg{}})
+		}
 	}
 	return out
 }
+
+// checkoutMsg checks out the current PR; it's palette-only, too disruptive for a key.
+type checkoutMsg struct{}
 
 // textInputActive is true while a prompt owns typed keys, so ctrl+k stays theirs.
 func (m model) textInputActive() bool {
@@ -141,7 +149,10 @@ func (m model) paletteView() string {
 		if i == 0 || c.section != cmds[i-1].section {
 			lines = append(lines, "  "+sty(th.muted, "", true, false).Render(strings.ToUpper(c.section)))
 		}
-		cap := keycap.Render(" " + c.key + " ")
+		cap := ""
+		if c.key != "" {
+			cap = keycap.Render(" " + c.key + " ")
+		}
 		descW := inner - 4 - lipgloss.Width(cap)
 		desc := truncateToWidth(c.desc, descW)
 		gap := strings.Repeat(" ", max(descW-lipgloss.Width(desc), 0))

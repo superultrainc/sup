@@ -138,3 +138,24 @@ func TestSpaceInInputs(t *testing.T) {
 		t.Fatalf("palette should take a space, got %q", m.palette.query)
 	}
 }
+
+func TestPaletteCheckout(t *testing.T) {
+	m := initialModel()
+	m.prs = mockPRs()
+	m.applyFilter()
+	m.visibleCount = len(m.filtered)
+	m = press(t, m, "enter")
+	if m.detail == nil || m.quitting {
+		t.Fatalf("enter should open the PR view, not check out")
+	}
+	m = press(t, m, "esc")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	m = press(t, next.(model), "c", "h", "e", "c", "k", "o", "u", "t")
+	if cmds := m.paletteCommands(); len(cmds) != 1 || cmds[0].key != "" {
+		t.Fatalf("checkout should be a palette-only command, got %+v", cmds)
+	}
+	m = press(t, m, "enter")
+	if m.selected == nil || !m.quitting || prKey(*m.selected) != prKey(m.filtered[0]) {
+		t.Fatalf("palette checkout should select the PR and quit")
+	}
+}

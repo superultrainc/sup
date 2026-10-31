@@ -285,6 +285,9 @@ type model struct {
 	actionStatus      string            // transient success/error feedback for review actions
 	helpMode          bool              // true while the help overlay is showing
 	palette           *commandPalette   // non-nil while the command palette is open
+	previewOn         bool              // split the list with a preview of the cursor's PR
+	preview           *prDetailView     // the preview pane's view, kept separate from detail
+	compactList       bool              // render the narrow list used beside the preview
 	visibleCount      int               // for animation
 	spinnerFrame      int               // for loading spinner
 	refreshID         int               // increments each refresh; stale results are dropped
@@ -500,6 +503,13 @@ func mockPRs() []PR {
 	]`
 	var prs []PR
 	json.Unmarshal([]byte(mockJSON), &prs)
+	for i := range prs {
+		prs[i].HeadRefOid = fmt.Sprintf("%07x", prs[i].Number*7919)
+		prs[i].UpdatedAt = demoNow.Add(-time.Duration(i*13) * time.Minute)
+	}
+	for i, d := range demoPRs {
+		prs = append(prs, d.toPR(len(prs)+i))
+	}
 	return prs
 }
 
@@ -569,12 +579,38 @@ func fetchUserOrgs() ([]string, error) {
 func (m model) confirmPrompt() string {
 	switch m.confirmAction {
 	case "draft":
-		return fmt.Sprintf("Convert PR #%d to draft? (y/n)", m.confirmPR.Number)
+		return fmt.Sprintf("Convert PR #%d to draft?", m.confirmPR.Number)
 	case "ready":
-		return fmt.Sprintf("Mark PR #%d ready for review? (y/n)", m.confirmPR.Number)
+		return fmt.Sprintf("Mark PR #%d ready for review?", m.confirmPR.Number)
 	}
 	verb := map[string]string{"approve": "Approve", "close": "Close"}[m.confirmAction]
-	return fmt.Sprintf("%s PR #%d? (y/n)", verb, m.confirmPR.Number)
+	return fmt.Sprintf("%s PR #%d?", verb, m.confirmPR.Number)
+}
+
+// confirmView is the centered modal asking to confirm m.confirmAction.
+func (m model) confirmView() string {
+	th := currentDiffTheme()
+	pr := *m.confirmPR
+	color, label := th.threadBorder, map[string]string{"draft": "Convert to draft", "ready": "Mark ready"}[m.confirmAction]
+	switch m.confirmAction {
+	case "approve":
+		color, label = th.addBar, "Approve"
+	case "close":
+		color, label = th.delBar, "Close PR"
+	}
+	width := min(56, max(m.width-6, 30))
+	muted := sty(th.muted, "", false, false)
+	lines := []string{
+		sty(color, "", true, false).Render(m.confirmPrompt()),
+		"",
+		sty(th.text, "", true, false).Render(truncate(pr.Title, width)),
+		muted.Render(truncate(pr.Repository.Owner.Login+"/"+pr.Repository.Name+" · "+pr.Author.Login, width)),
+		"",
+		sty("16", color, true, false).Render(" y ") + " " + sty(th.text, "", false, false).Render(label) + "    " +
+			sty(th.text, th.chipBg, false, false).Render(" esc ") + " " + muted.Render("Cancel"),
+	}
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(color)).Padding(1, 3).Width(width + 6)
+	return box.Render(strings.Join(lines, "\n"))
 }
 
 func reviewDoneText(action string, pr PR) string {
@@ -586,6 +622,10 @@ var reviewEvents = map[string]string{"approve": "APPROVE", "request-changes": "R
 
 func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 	return func() tea.Msg {
+		if demoMode {
+			demoActions.Store(prKey(pr), action)
+			return reviewSubmittedMsg{action: action, pr: pr}
+		}
 		review := map[string]string{"event": reviewEvents[action]}
 		if body != "" {
 			review["body"] = body
@@ -655,7 +695,7 @@ func demoRows(prs []PR) []PR {
 	for _, want := range prs {
 		for _, mock := range mockPRs() {
 			if samePR(mock, want) {
-				out = append(out, mock)
+				out = append(out, applyDemoAction(mock))
 			}
 		}
 	}
@@ -735,13 +775,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scheduleKittyFlush()
 	}
 	next, cmd := m.update(msg)
-	if nm := next.(model); nm.detail != nil {
+	nm := next.(model)
+	if nm.detail != nil {
 		// Panes render lazily, only once their tab is showing.
 		nm.detail.ensure()
 		nm.detail.clampScroll(nm.height)
 	}
+	nm.syncPreview()
 	// Any rebuild may have queued image transmissions for the next frame.
-	return next, tea.Batch(cmd, scheduleKittyFlush())
+	return nm, tea.Batch(cmd, scheduleKittyFlush())
 }
 
 func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -772,6 +814,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.detail != nil {
 			m.detail.rebuildForImages()
 			m.detail.clampScroll(m.height)
+		}
+		if m.preview != nil && m.preview.detail != nil {
+			m.preview.rebuildForImages()
 		}
 		return m, nil
 
@@ -822,6 +867,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case checkoutMsg:
+		if pr, ok := m.currentPR(); ok {
+			m.selected = &pr
+			m.quitting = true
+			return m, tea.Quit
+		}
+		return m, nil
+
 	case paletteTickMsg:
 		if p := m.palette; p != nil && p.frame < paletteFrames {
 			p.frame++
@@ -858,7 +911,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh just this PR so its badge reflects the new review state.
 		cmds := []tea.Cmd{fetchSinglePRCmd(msg.pr)}
-		if m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr) {
+		if (m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr)) || (m.preview != nil && prKey(m.preview.pr) == prKey(msg.pr)) {
 			cmds = append(cmds, fetchPRDetailCmd(msg.pr))
 		}
 		return m, tea.Batch(cmds...)
@@ -1230,7 +1283,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Confirmation prompts intercept input before any other handling.
 	if m.confirmAction != "" {
 		switch msg.String() {
-		case "y", "Y":
+		case "y", "Y", "enter":
 			action := m.confirmAction
 			pr := *m.confirmPR
 			m.confirmAction = ""
@@ -1244,7 +1297,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Optimistic: confirm now; an error replaces this if GitHub rejects it.
 			m.actionStatus = reviewDoneText(action, pr)
 			return m, submitReviewCmd(action, pr, "")
-		default:
+		case "n", "N", "esc", "q":
 			m.confirmAction = ""
 			m.confirmPR = nil
 		}
@@ -1329,15 +1382,22 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.helpMode = true
 		return m, nil
 
-	case "enter":
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			m.selected = &m.filtered[m.cursor]
-			m.quitting = true
-			return m, tea.Quit
+	case " ":
+		m.previewOn = !m.previewOn
+		return m, m.schedulePrefetch()
+
+	case "ctrl+d", "ctrl+u":
+		if v := m.preview; v != nil && m.previewActive() {
+			step := v.bodyHeight(m.height) / 2
+			if msg.String() == "ctrl+u" {
+				step = -step
+			}
+			v.panes[tabConversation].scroll += step
+			v.clampScroll(m.height)
 		}
 		return m, nil
 
-	case "v":
+	case "enter", "v":
 		if pr, ok := m.currentPR(); ok {
 			return m, m.openDetail(pr)
 		}
@@ -1528,6 +1588,16 @@ func statusLabelForFilter(pr PR) string {
 	}
 }
 
+// banner shows a prompt or action result as a colored pill so it stands out.
+func banner(text string) string {
+	fg, bg := "16", "35" // success
+	switch {
+	case strings.HasPrefix(text, "Error"), strings.Contains(text, "cancelled"):
+		fg, bg = "15", "160"
+	}
+	return sty(fg, bg, true, false).Render(" " + text + " ")
+}
+
 // statusBadgeLabel is the display text of the list status badge.
 func statusBadgeLabel(pr PR) string { return badgeLabels[statusKind(pr)] }
 
@@ -1601,6 +1671,8 @@ func (m model) helpSections() []helpSection {
 			{"j / ↓", "Move down"},
 			{"k / ↑", "Move up"},
 			{"g / G", "Top / bottom"},
+			{"space", "Toggle preview pane"},
+			{"ctrl+d / u", "Scroll preview"},
 		}},
 		{"Filter", [][2]string{
 			{"/", "Open filter"},
@@ -1613,8 +1685,7 @@ func (m model) helpSections() []helpSection {
 			{"r", "My reviews"},
 		}},
 		{"Actions", [][2]string{
-			{"Enter", "Checkout PR"},
-			{"v", "Open PR view"},
+			{"Enter", "Open PR view"},
 			{"m", "Merge PR"},
 			{"d", "Open the PR's diff"},
 			{"A", "Approve"},
@@ -1770,6 +1841,11 @@ func (m model) View() string {
 }
 
 func (m model) view() string {
+	if m.confirmPR != nil {
+		under := m // render the screen underneath without the modal
+		under.confirmAction, under.confirmPR = "", nil
+		return overlayCenter(under.view(), m.confirmView(), m.width, m.height)
+	}
 	if m.palette != nil {
 		under := m // render the screen underneath without the palette
 		under.palette = nil
@@ -1781,6 +1857,9 @@ func (m model) view() string {
 	}
 	if m.detail != nil {
 		return m.detailView()
+	}
+	if m.previewActive() {
+		return m.splitView()
 	}
 	var s strings.Builder
 	lp := newListPainters()
@@ -1809,7 +1888,7 @@ func (m model) view() string {
 
 	s.WriteString("\n")
 	separatorWidth := m.width - 2 // account for "  " prefix
-	if separatorWidth < 60 {
+	if separatorWidth < 60 && !m.compactList {
 		separatorWidth = 60
 	}
 	rowWidth := separatorWidth
@@ -1821,15 +1900,6 @@ func (m model) view() string {
 		filterLine = "  Filter: " + strings.Join(parts, " ")
 	}
 	switch {
-	case m.actionPending:
-		spinner := spinnerFrames[m.spinnerFrame]
-		s.WriteString(lp.loading.Render("  " + spinner + " Submitting review..."))
-	case m.actionStatus != "":
-		style := approvedStyle
-		if strings.HasPrefix(m.actionStatus, "Error") || strings.Contains(m.actionStatus, "cancelled") {
-			style = changesRequestedStyle
-		}
-		s.WriteString(style.Render("  " + m.actionStatus))
 	case filterLine == "  ":
 		s.WriteString(filterLine)
 	default:
@@ -1838,7 +1908,11 @@ func (m model) view() string {
 	s.WriteString("\n")
 
 	// Always show header
-	s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
+	if m.compactList {
+		s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("#", colNum) + "TITLE"))
+	} else {
+		s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
+	}
 	s.WriteString("\n")
 	s.WriteString(lp.dim.Render("  " + strings.Repeat("─", separatorWidth)))
 	s.WriteString("\n")
@@ -1881,6 +1955,10 @@ func (m model) view() string {
 		for i := start; i < end; i++ {
 			pr := m.filtered[i]
 			isSelected := m.cursor == i
+			if m.compactList {
+				s.WriteString(compactRow(pr, isSelected, rowWidth+2, lp) + "\n")
+				continue
+			}
 
 			cursor := "  "
 			if isSelected {
@@ -1950,8 +2028,10 @@ func (m model) view() string {
 		} else {
 			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))
 		}
-		if m.confirmPR != nil {
-			s.WriteString(lp.filter.Render("  " + m.confirmPrompt()))
+		if m.actionPending {
+			s.WriteString(lp.loading.Render("  " + spinnerFrames[m.spinnerFrame] + " Submitting review..."))
+		} else if m.actionStatus != "" {
+			s.WriteString("  " + banner(m.actionStatus))
 		} else if m.refreshing {
 			s.WriteString(lp.loading.Render("  " + spinnerFrames[m.spinnerFrame] + " Refreshing"))
 		} else if status := m.freshness(); status != "" {
@@ -1960,7 +2040,11 @@ func (m model) view() string {
 	}
 
 	s.WriteString("\n")
-	s.WriteString(lp.help.Render(truncateToWidth("  ctrl+k: commands · /: filter · enter: checkout · ?: help", rowWidth)))
+	hints := "  ctrl+k: commands · /: filter · space: preview · enter: open · ?: help"
+	if m.compactList {
+		hints = "  space: close · ctrl+d/u: scroll · v: open"
+	}
+	s.WriteString(lp.help.Render(truncateToWidth(hints, rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()
@@ -2158,7 +2242,7 @@ func main() {
 
 	// In demo mode, skip org detection
 	if demoMode {
-		orgs = []string{"acme-corp"}
+		orgs, currentUser = []string{"acme-corp"}, "sarah"
 	} else if mineMode {
 		if meta, ok := loadCachedMeta(); ok && meta.CurrentUser != "" {
 			currentUser = meta.CurrentUser
@@ -2202,10 +2286,12 @@ func main() {
 	go pruneDiskCache()
 	go pruneImageCache()
 	detectImageMode()
+	enableGraphemeWidths()
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	finalModel, err := p.Run()
 	kittyFreeAll()
+	restoreGraphemeWidths()
 	if fm, ok := finalModel.(model); ok && fm.prsDirty {
 		savePRsToCache(fm.prs)
 	}

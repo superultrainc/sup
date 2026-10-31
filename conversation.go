@@ -153,14 +153,15 @@ func (v *prDetailView) rebuildConv() {
 		at := t.Comments.Nodes[0].CreatedAt
 		if t.IsResolved {
 			// GitHub folds resolved conversations; the Files tab still shows them in full.
-			items = append(items, timelineItem{at: at, kind: itemEvent, render: func(int) []string {
+			items = append(items, timelineItem{at: at, kind: itemEvent, render: func(w int) []string {
 				n := len(t.Comments.Nodes)
 				noun := "comments"
 				if n == 1 {
 					noun = "comment"
 				}
-				return []string{" " + approvedStyle.Render("✓") + "  " + sty(th.muted, "", false, false).Render("Resolved conversation on ") +
-					pathStyle.Render(threadLoc(t)) + sty(th.muted, "", false, false).Render(fmt.Sprintf(" · %d %s", n, noun))}
+				line := " " + approvedStyle.Render("✓") + "  " + sty(th.muted, "", false, false).Render("Resolved conversation on ") +
+					pathStyle.Render(threadLoc(t)) + sty(th.muted, "", false, false).Render(fmt.Sprintf(" · %d %s", n, noun))
+				return []string{ansi.Truncate(line, w, "…")}
 			}})
 			continue
 		}

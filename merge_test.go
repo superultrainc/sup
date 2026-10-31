@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -77,7 +78,7 @@ func TestConvertToDraft(t *testing.T) {
 	m.detail.pr.IsDraft = false
 	key := prKey(m.detail.pr)
 	m = press(t, m, "W")
-	if !strings.Contains(ansi.Strip(m.View()), "to draft? (y/n)") {
+	if !strings.Contains(ansi.Strip(m.View()), "to draft?") {
 		t.Fatalf("W should ask to confirm")
 	}
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
@@ -100,7 +101,7 @@ func TestMarkReady(t *testing.T) {
 	m := detailModel(120, 30)
 	m.detail.pr.IsDraft = true
 	m = press(t, m, "W")
-	if !strings.Contains(ansi.Strip(m.View()), "ready for review? (y/n)") {
+	if !strings.Contains(ansi.Strip(m.View()), "ready for review?") {
 		t.Fatalf("W on a draft should ask to mark it ready")
 	}
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
@@ -109,5 +110,41 @@ func TestMarkReady(t *testing.T) {
 	m = next.(model)
 	if m.detail.pr.IsDraft || !strings.HasPrefix(m.actionStatus, "✓ Marked") {
 		t.Fatalf("PR should be ready, got status %q", m.actionStatus)
+	}
+}
+
+func TestConfirmModalKeys(t *testing.T) {
+	demoMode = true
+	t.Cleanup(func() { demoMode = false })
+	m := press(t, detailModel(120, 30), "A", "j")
+	if m.confirmPR == nil || !strings.Contains(ansi.Strip(m.View()), "Approve PR #") {
+		t.Fatalf("a stray key should leave the approve modal open")
+	}
+	m = press(t, m, "esc")
+	if m.confirmPR != nil || m.detail == nil {
+		t.Fatalf("esc should cancel the modal and stay in the PR view")
+	}
+	m = press(t, m, "A", "enter")
+	if m.confirmPR != nil || !strings.HasPrefix(m.actionStatus, "✓ Approved") {
+		t.Fatalf("enter should confirm, got status %q", m.actionStatus)
+	}
+}
+
+func TestDemoActionsStick(t *testing.T) {
+	demoMode = true
+	t.Cleanup(func() { demoMode = false; demoActions = sync.Map{} })
+	prs := mockPRs()
+	merged, drafted := prs[0], prs[1]
+	runMergeCmd(merged, nil, mergeDialog{}, mergeMethod{})()
+	runDraftCmd(drafted, true)()
+
+	msg := discoverCmd("", 1)().(discoveredMsg)
+	for _, s := range msg.stubs {
+		if prKey(s.asPR()) == prKey(merged) {
+			t.Fatalf("a merged demo PR should stay gone after a refresh")
+		}
+	}
+	if rows := demoRows([]PR{drafted}); len(rows) != 1 || !rows[0].IsDraft {
+		t.Fatalf("a demo PR converted to draft should stay a draft")
 	}
 }

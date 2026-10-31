@@ -1307,7 +1307,10 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Filter cycling keys run before the transient-feedback reset below.
 	switch msg.String() {
 	case "s":
-		m.cycleStatusFilter()
+		m.cycleStatusFilter(1)
+		return m, nil
+	case "S":
+		m.cycleStatusFilter(-1)
 		return m, nil
 	case "p":
 		m.cycleRepoFilter(1)
@@ -1506,15 +1509,15 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-var statusFilters = []string{"draft", "approved", "denied", "review", "commented", "open"}
+var statusFilters = []string{"approved", "denied", "review", "commented", "open", "draft"}
 
-func (m *model) cycleStatusFilter() {
+func (m *model) cycleStatusFilter(delta int) {
 	n := len(statusFilters) + 1 // last position is "no filter"
 	pos := m.statusFilterIndex
 	if pos < 0 {
 		pos = len(statusFilters)
 	}
-	pos = (pos + 1) % n
+	pos = ((pos+delta)%n + n) % n
 	if pos == len(statusFilters) {
 		m.statusFilterIndex = -1
 	} else {
@@ -1676,7 +1679,7 @@ func (m model) helpSections() []helpSection {
 		}},
 		{"Filter", [][2]string{
 			{"/", "Open filter"},
-			{"s", "Cycle status filter"},
+			{"s / S", "Cycle status (fwd / back)"},
 			{"p / P", "Cycle repo (fwd / back)"},
 			{"#repo", "Filter by repo"},
 			{"@user", "Filter by reviewer"},

@@ -782,6 +782,9 @@ func mockPRDetail(pr PR) *prDetail {
 		d.MergeStateStatus = "DRAFT"
 		rollup.State, rollup.Contexts.Nodes[2].Conclusion, rollup.Contexts.Nodes[2].Status = "PENDING", "", "IN_PROGRESS"
 	}
+	if c, ok := demoContentFor(pr); ok {
+		applyDemoContent(d, pr, c)
+	}
 	return d
 }
 

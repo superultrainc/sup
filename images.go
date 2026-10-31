@@ -179,6 +179,13 @@ func finishImage(img image.Image) (image.Image, string) {
 }
 
 func loadImage(j imageJob) (image.Image, string, error) {
+	if name, ok := strings.CutPrefix(j.url, "demo:"); ok {
+		if img := demoImage(name); img != nil {
+			img, b64 := finishImage(img)
+			return img, b64, nil
+		}
+		return nil, "", fmt.Errorf("no demo image %q", name)
+	}
 	path := imageCachePath(j.key)
 	if f, err := os.Open(path); err == nil {
 		defer f.Close()

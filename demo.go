@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -132,8 +134,8 @@ func (m *model) demoPrefill() {
 			e.detail, e.detailAt = mockPRDetail(pr), time.Now()
 		}
 		if e.files == nil {
-			e.patch, e.head, e.hasPatch = mockPatch, pr.HeadRefOid, true
-			e.files = parseUnifiedDiff(mockPatch)
+			e.patch, e.head, e.hasPatch = demoPatch(pr), pr.HeadRefOid, true
+			e.files = parseUnifiedDiff(e.patch)
 			highlightFiles(e.files)
 		}
 	}
@@ -172,4 +174,128 @@ func applyDemoAction(pr PR) PR {
 		pr.Reviews.Nodes[0].Author.Login = currentUser
 	}
 	return pr
+}
+
+// demoContent is one demo PR's page; demoContents (demo_content.go) holds them by "repo#number".
+type demoContent struct {
+	body     string
+	commits  []string // headlines, oldest first
+	comments []demoComment
+	review   string // body of the latest review, if the PR has one
+	thread   demoThread
+	patch    string
+}
+
+type demoComment struct{ author, body string }
+
+// demoThread is one inline review comment on a line of the PR's patch.
+type demoThread struct {
+	path     string
+	line     int // new-side line number in the patch
+	author   string
+	body     string
+	reply    string // the PR author's answer, if any
+	resolved bool
+}
+
+func demoContentFor(pr PR) (demoContent, bool) {
+	if !demoMode {
+		return demoContent{}, false
+	}
+	c, ok := demoContents[pr.Repository.Name+"#"+strconv.Itoa(pr.Number)]
+	return c, ok
+}
+
+func demoPatch(pr PR) string {
+	if c, ok := demoContentFor(pr); ok && c.patch != "" {
+		return c.patch
+	}
+	return mockPatch
+}
+
+// demoHunk is the diff context GitHub attaches to a review comment: the hunk up to line.
+func demoHunk(patch, path string, line int) string {
+	var hunk []string
+	inFile, n := false, 0
+	for _, l := range strings.Split(patch, "\n") {
+		switch {
+		case strings.HasPrefix(l, "diff --git "):
+			inFile, hunk = strings.HasSuffix(l, " b/"+path), nil
+		case !inFile:
+		case strings.HasPrefix(l, "@@"):
+			hunk = []string{l}
+			fmt.Sscanf(l[strings.Index(l, "+")+1:], "%d", &n)
+		case hunk != nil && !strings.HasPrefix(l, `\`):
+			hunk = append(hunk, l)
+			if !strings.HasPrefix(l, "-") {
+				if n == line {
+					return strings.Join(hunk, "\n")
+				}
+				n++
+			}
+		}
+	}
+	return ""
+}
+
+var demoLabels = map[string]prLabel{
+	"macos-app": {"macOS", "1d76db"}, "ios-app": {"iOS", "0e8a16"}, "web-app": {"web", "fbca04"},
+	"docs": {"docs", "c5def5"}, "data-service": {"data", "5319e7"},
+}
+
+// applyDemoContent swaps the generic mock page for the PR's own content.
+func applyDemoContent(d *prDetail, pr PR, c demoContent) {
+	now := time.Now()
+	d.Body = c.body
+	d.ChangedFiles = strings.Count(c.patch, "diff --git ")
+	d.Labels.Nodes = []prLabel{{"backend", "5319e7"}}
+	if l, ok := demoLabels[pr.Repository.Name]; ok {
+		d.Labels.Nodes = []prLabel{l}
+	}
+
+	d.ReviewRequests.Nodes = make([]struct {
+		RequestedReviewer struct {
+			Login string `json:"login"`
+			Name  string `json:"name"`
+			Slug  string `json:"slug"` // teams only
+		} `json:"requestedReviewer"`
+	}, len(pr.ReviewRequests.Nodes))
+	for i, r := range pr.ReviewRequests.Nodes {
+		d.ReviewRequests.Nodes[i].RequestedReviewer.Login = r.RequestedReviewer.Login
+	}
+
+	d.AllCommits.Nodes = nil
+	for i, h := range c.commits {
+		var cm prCommit
+		cm.Commit.AbbreviatedOid = fmt.Sprintf("%07x", (pr.Number*31+i)*104729%0xfffffff)
+		cm.Commit.MessageHeadline = h
+		cm.Commit.CommittedDate = now.Add(time.Duration(-80+i*9) * time.Hour)
+		cm.Commit.Author.User = &ghActor{pr.Author.Login}
+		d.AllCommits.Nodes = append(d.AllCommits.Nodes, cm)
+	}
+	d.Commits.TotalCount = len(c.commits)
+
+	d.Comments.Nodes = nil
+	for i, cm := range c.comments {
+		d.Comments.Nodes = append(d.Comments.Nodes, prComment{Author: ghActor{cm.author}, Body: cm.body, CreatedAt: now.Add(time.Duration(-60+i*7) * time.Hour)})
+	}
+
+	d.ReviewThreads.Nodes = nil
+	if t := c.thread; t.path != "" {
+		line := t.line
+		rt := reviewThread{Path: t.path, Line: &line, DiffSide: "RIGHT", IsResolved: t.resolved}
+		rt.Comments.Nodes = []prComment{{Author: ghActor{t.author}, Body: t.body, CreatedAt: now.Add(-30 * time.Hour), DiffHunk: demoHunk(c.patch, t.path, t.line)}}
+		if t.reply != "" {
+			rt.Comments.Nodes = append(rt.Comments.Nodes, prComment{Author: ghActor{pr.Author.Login}, Body: t.reply, CreatedAt: now.Add(-28 * time.Hour)})
+		}
+		d.ReviewThreads.Nodes = []reviewThread{rt}
+	}
+
+	if len(d.Reviews.Nodes) > 0 {
+		d.Reviews.Nodes = d.Reviews.Nodes[:1]
+		d.Reviews.Nodes[0].Body = c.review
+		if len(pr.Reviews.Nodes) > 0 {
+			d.Reviews.Nodes[0].Author = ghActor{pr.Reviews.Nodes[0].Author.Login}
+		}
+	}
 }

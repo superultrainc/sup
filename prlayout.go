@@ -212,8 +212,6 @@ func (m model) detailView() string {
 	switch {
 	case v.picker != nil:
 		rows = m.pickerView(bodyH)
-	case v.merge != nil:
-		rows = m.mergeView(bodyH)
 	case v.tab != tabFiles && v.detail == nil:
 		rows = []string{"", m.placeholder(v.err, "Loading PR...")}
 	case v.tab == tabFiles && v.diff == nil:
@@ -292,6 +290,8 @@ func (m model) detailFooter() string {
 		status = v.searchStatus()
 	case m.actionStatus != "":
 		status = " " + banner(m.actionStatus)
+	case m.mergingText() != "":
+		status = reviewRequestedStyle.Render(" " + m.mergingText())
 	case v.err != nil && v.detail != nil:
 		status = changesRequestedStyle.Render(" Reload failed: " + v.err.Error())
 	}
@@ -306,8 +306,6 @@ func (m model) detailFooter() string {
 		help = " type to search · enter keep · esc cancel"
 	case v.picker != nil:
 		help = " ↑/↓ move · space toggle · type to filter · enter save · esc cancel"
-	case v.merge != nil:
-		help = " ↑/↓ method · b delete branch · a auto-merge · enter merge · esc cancel"
 	default:
 		help = " ctrl+k commands · / search · tab next tab · esc back · ? help"
 	}

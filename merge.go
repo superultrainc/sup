@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // mergeMethod is one of GitHub's merge button options.
@@ -27,16 +28,15 @@ var allMergeMethods = []mergeMethod{
 // mergeDialog holds only choices; what's allowed is read from the PR detail
 // each render, so the dialog works while the detail is still loading.
 type mergeDialog struct {
+	pr           PR
 	method       string
 	deleteBranch bool
 	auto         bool
 	admin        bool
-	saving       bool
-	err          error
 }
 
-func newMergeDialog(d *prDetail) *mergeDialog {
-	md := &mergeDialog{deleteBranch: true}
+func newMergeDialog(pr PR, d *prDetail) *mergeDialog {
+	md := &mergeDialog{pr: pr, deleteBranch: true}
 	if d != nil {
 		md.method = d.Repository.ViewerDefaultMergeMethod
 		md.auto = d.MergeStateStatus == "BLOCKED" && !d.ViewerCanMergeAsAdmin
@@ -131,7 +131,10 @@ type mergeDoneMsg struct {
 	ready  bool // marked ready for review rather than merged
 	draft  bool // converted back to a draft
 	closed bool // closed without merging
-	err    error
+	merged bool // a merge request, finished or failed
+	// deleteRef is the head branch to delete now that the merge landed.
+	deleteRef string
+	err       error
 }
 
 func runCloseCmd(pr PR) tea.Cmd {
@@ -187,45 +190,68 @@ func runDraftCmd(pr PR, draft bool) tea.Cmd {
 
 func runMergeCmd(pr PR, d *prDetail, md mergeDialog, method mergeMethod) tea.Cmd {
 	return func() tea.Msg {
-		msg := mergeDoneMsg{pr: pr, method: method, auto: md.auto}
+		msg := mergeDoneMsg{pr: pr, method: method, auto: md.auto, merged: true}
 		if demoMode {
 			if !md.auto {
 				demoActions.Store(prKey(pr), "merged")
 			}
 			return msg
 		}
-		msg.err = mergePR(pr, d, md, method)
+		msg.deleteRef, msg.err = mergePR(pr, d, md, method)
 		return msg
 	}
 }
 
 // mergePR merges through the API. Merge queues need gh's queue handling, so
 // that one case falls back to `gh pr merge`.
-func mergePR(pr PR, d *prDetail, md mergeDialog, method mergeMethod) error {
+// It returns the branch to delete afterwards, so the merge reports without waiting on that.
+func mergePR(pr PR, d *prDetail, md mergeDialog, method mergeMethod) (deleteRef string, err error) {
 	if md.auto {
 		out, err := graphqlPOST(fmt.Sprintf(`mutation { enablePullRequestAutoMerge(input: {pullRequestId: %q, mergeMethod: %s}) { clientMutationId } }`, d.ID, method.id))
 		if err != nil {
-			return err
+			return "", err
 		}
-		return graphqlErrors(out)
+		return "", graphqlErrors(out)
 	}
 	// sha makes GitHub refuse if commits landed after this view loaded, so nothing unreviewed merges.
 	body := map[string]string{"merge_method": strings.ToLower(method.id), "sha": d.HeadRefOid}
 	if _, err := githubREST("PUT", fmt.Sprintf("%s/pulls/%d/merge", repoPath(pr), pr.Number), body); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "merge queue") {
-			return ghMerge(pr, d, md, method)
+			return "", ghMerge(pr, d, md, method)
 		}
-		return err
+		return "", err
 	}
-	// A fork's branch isn't ours to delete; 422 means the repo already deleted it.
+	// A fork's branch isn't ours to delete.
 	if md.deleteBranch && !d.IsCrossRepo && d.HeadRefName != "" {
-		ref := url.PathEscape(d.HeadRefName)
-		ref = strings.ReplaceAll(ref, "%2F", "/")
+		return d.HeadRefName, nil
+	}
+	return "", nil
+}
+
+type branchDeletedMsg struct{ err error }
+
+// deleteBranchCmd deletes a merged PR's head branch; a 422 means the repo already did.
+func deleteBranchCmd(pr PR, branch string) tea.Cmd {
+	return func() tea.Msg {
+		ref := strings.ReplaceAll(url.PathEscape(branch), "%2F", "/")
 		if _, err := githubREST("DELETE", repoPath(pr)+"/git/refs/heads/"+ref, nil); err != nil && !strings.Contains(err.Error(), "Reference does not exist") {
-			return fmt.Errorf("merged, but deleting the branch failed: %w", err)
+			return branchDeletedMsg{fmt.Errorf("merged #%d, but deleting the branch failed: %w", pr.Number, err)}
+		}
+		return branchDeletedMsg{}
+	}
+}
+
+// mergingText describes merges still in flight, for the status line.
+func (m model) mergingText() string {
+	switch len(m.merging) {
+	case 0:
+		return ""
+	case 1:
+		for _, n := range m.merging {
+			return fmt.Sprintf("%s Merging #%d…", spinnerFrames[m.spinnerFrame], n)
 		}
 	}
-	return nil
+	return fmt.Sprintf("%s Merging %d PRs…", spinnerFrames[m.spinnerFrame], len(m.merging))
 }
 
 func ghMerge(pr PR, d *prDetail, md mergeDialog, method mergeMethod) error {
@@ -248,13 +274,35 @@ func ghMerge(pr PR, d *prDetail, md mergeDialog, method mergeMethod) error {
 	return nil
 }
 
-func (m model) handleMergeInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	v := m.detail
-	md := v.merge
-	d := v.detail
-	if md.saving {
-		return m, nil
+// mergeDetail is the merge PR's cached detail, nil until it loads.
+func (m model) mergeDetail() *prDetail {
+	if e := m.cache[prKey(m.merge.pr)]; e != nil {
+		return e.detail
 	}
+	return nil
+}
+
+// openMerge shows the merge modal for pr, fetching its detail if it isn't cached.
+func (m *model) openMerge(pr PR) tea.Cmd {
+	key := prKey(pr)
+	_, inMemory := m.cache[key]
+	e := m.cacheEntry(key)
+	if _, busy := m.merging[key]; busy {
+		m.actionStatus = fmt.Sprintf("#%d is already merging", pr.Number)
+		return nil
+	}
+	m.merge = newMergeDialog(pr, e.detail)
+	m.actionStatus = ""
+	cmds := append(m.fetchMissing(pr, e), spinnerTick())
+	if !inMemory {
+		cmds = append(cmds, loadDiskCacheCmd(pr))
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m model) handleMergeInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	md := m.merge
+	d := m.mergeDetail()
 	methods := allowedMergeMethods(d)
 	cur := 0
 	if sel, ok := md.selectedMethod(d); ok {
@@ -265,8 +313,8 @@ func (m model) handleMergeInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch msg.String() {
-	case "esc", "q":
-		v.merge = nil
+	case "esc", "q", "n":
+		m.merge = nil
 	case "up", "k":
 		if len(methods) > 0 {
 			md.method = methods[max(cur-1, 0)].id
@@ -289,32 +337,33 @@ func (m model) handleMergeInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				md.auto = false
 			}
 		}
-	case "enter":
+	case "enter", "y":
 		if md.blockReason(d) != "" {
 			return m, nil
 		}
+		// Merge in the background so navigation never waits on GitHub.
 		method, _ := md.selectedMethod(d)
-		md.saving, md.err = true, nil
-		return m, tea.Batch(runMergeCmd(v.pr, d, *md, method), spinnerTick())
+		m.merge = nil
+		if m.merging == nil {
+			m.merging = map[string]int{}
+		}
+		m.merging[prKey(md.pr)] = md.pr.Number
+		return m, tea.Batch(runMergeCmd(md.pr, d, *md, method), spinnerTick())
 	}
 	return m, nil
 }
 
 func (m *model) handleMergeDone(msg mergeDoneMsg) tea.Cmd {
 	v := m.detail
+	key := prKey(msg.pr)
+	if msg.merged {
+		delete(m.merging, key)
+	}
 	if msg.err != nil {
-		if v != nil && v.merge != nil {
-			v.merge.saving, v.merge.err = false, msg.err
-		} else {
-			m.actionStatus = "Error: " + msg.err.Error()
-		}
+		m.actionStatus = fmt.Sprintf("Error on #%d: %v", msg.pr.Number, msg.err)
 		return nil
 	}
-	if v != nil {
-		v.merge = nil
-	}
 	var save tea.Cmd
-	key := prKey(msg.pr)
 	switch {
 	case msg.ready, msg.draft:
 		m.actionStatus = fmt.Sprintf("✓ Marked #%d ready for review", msg.pr.Number)
@@ -351,6 +400,9 @@ func (m *model) handleMergeDone(msg mergeDoneMsg) tea.Cmd {
 		m.syncRepoList()
 		m.applyFilterKeepingCursor()
 		save = m.markPRsDirty()
+		if msg.deleteRef != "" {
+			save = tea.Batch(save, deleteBranchCmd(msg.pr, msg.deleteRef))
+		}
 	}
 	if v != nil && prKey(v.pr) == key {
 		e := m.cacheEntry(key)
@@ -361,24 +413,35 @@ func (m *model) handleMergeDone(msg mergeDoneMsg) tea.Cmd {
 	return save
 }
 
-func (m model) mergeView(height int) []string {
-	v := m.detail
-	md := v.merge
-	d := v.detail
+// mergeView is the centered merge modal.
+func (m model) mergeView() string {
+	md := m.merge
+	pr := md.pr
+	d := m.mergeDetail()
 	th := currentDiffTheme()
-	width := m.width - 2
+	width := min(64, max(m.width-6, 30))
 	muted := sty(th.muted, "", false, false)
 	text := sty(th.text, "", false, false)
 
-	band := th.band
-	left := sty(th.text, band, true, false).Render("Merge pull request")
-	right := sty(th.muted, band, false, false).Render(fmt.Sprintf("#%d", v.pr.Number))
-	var body []string
+	border := th.addBar
+	if d != nil {
+		if ok, _ := mergeState(d); ok < 0 {
+			border = th.delBar
+		} else if ok == 0 {
+			border = th.threadBorder
+		}
+	}
+	body := []string{
+		sty(border, "", true, false).Render(fmt.Sprintf("Merge PR #%d?", pr.Number)),
+		"",
+		sty(th.text, "", true, false).Render(truncate(pr.Title, width)),
+		muted.Render(truncate(pr.Repository.Owner.Login+"/"+pr.Repository.Name+" · "+pr.Author.Login, width)),
+		"",
+	}
 
-	switch {
-	case d == nil:
+	if d == nil {
 		body = append(body, reviewRequestedStyle.Render(spinnerFrames[m.spinnerFrame]+" Loading PR..."))
-	default:
+	} else {
 		ok, state := mergeState(d)
 		icon, color := "●", th.threadBorder
 		switch ok {
@@ -387,7 +450,7 @@ func (m model) mergeView(height int) []string {
 		case -1:
 			icon, color = "✗", th.delBar
 		}
-		body = append(body, sty(color, "", true, false).Render(icon)+"  "+text.Render(state))
+		body = append(body, sty(color, "", true, false).Render(icon)+"  "+text.Render(truncate(state, width-3)))
 		if d.AutoMergeRequest != nil {
 			body = append(body, sty(th.addBar, "", false, false).Render("✓")+"  "+
 				muted.Render("Auto-merge is already enabled ("+strings.ToLower(d.AutoMergeRequest.MergeMethod)+")"))
@@ -396,13 +459,12 @@ func (m model) mergeView(height int) []string {
 
 		sel, _ := md.selectedMethod(d)
 		for _, mm := range allowedMergeMethods(d) {
-			caret, radio, label := "  ", muted.Render("○ "), text.Render(mm.label)
+			radio, label := muted.Render("○ "), text.Render(mm.label)
 			if mm.id == sel.id {
-				caret = caretStyle.Render("» ")
 				radio = sty(th.addBar, "", true, false).Render("● ")
 				label = sty(th.text, "", true, false).Render(mm.label)
 			}
-			body = append(body, caret+radio+label)
+			body = append(body, radio+label)
 		}
 		body = append(body, "")
 
@@ -412,42 +474,26 @@ func (m model) mergeView(height int) []string {
 			}
 			return muted.Render("[ ] ")
 		}
-		body = append(body, box(md.deleteBranch)+text.Render("Delete ")+chip(d.HeadRefName, th.branchFg, th.branchBg)+text.Render(" after merge")+muted.Render("   b"))
-		body = append(body, box(md.auto)+text.Render("Enable auto-merge")+muted.Render(" (merge once requirements are met)   a"))
+		branch := chip(truncate(d.HeadRefName, max(width-30, 8)), th.branchFg, th.branchBg)
+		body = append(body, box(md.deleteBranch)+text.Render("Delete ")+branch+text.Render(" after merge")+muted.Render("  b"))
+		body = append(body, box(md.auto)+text.Render("Enable auto-merge")+muted.Render("  a"))
 		if d.ViewerCanMergeAsAdmin && d.MergeStateStatus == "BLOCKED" {
-			body = append(body, box(md.admin)+text.Render("Bypass rules and merge as admin")+muted.Render("   !"))
+			body = append(body, box(md.admin)+text.Render("Bypass rules and merge as admin")+muted.Render("  !"))
 		}
 		body = append(body, "")
 
+		label := "Merge"
+		if md.auto {
+			label = "Enable auto-merge"
+		}
 		switch {
-		case md.saving:
-			body = append(body, reviewRequestedStyle.Render(spinnerFrames[m.spinnerFrame]+" Merging..."))
-		case md.err != nil:
-			body = append(body, changesRequestedStyle.Render("Error: "+md.err.Error()))
 		case md.blockReason(d) != "":
-			body = append(body, changesRequestedStyle.Render(md.blockReason(d)))
+			body = append(body, changesRequestedStyle.Render(truncate(md.blockReason(d), width)))
 		default:
-			action := "merge"
-			if md.auto {
-				action = "enable auto-merge"
-			}
-			body = append(body, sty(th.addBar, "", true, false).Render("enter")+muted.Render(" "+action+" · esc cancel"))
+			body = append(body, sty("16", th.addBar, true, false).Render(" y ")+" "+text.Render(label)+"    "+
+				sty(th.text, th.chipBg, false, false).Render(" esc ")+" "+muted.Render("Cancel")+"    "+muted.Render("↑↓ method"))
 		}
 	}
-	border := th.addBar
-	if d != nil {
-		if ok, _ := mergeState(d); ok < 0 {
-			border = th.delBar
-		} else if ok == 0 {
-			border = th.threadBorder
-		}
-	}
-	out := bandCard(left, right, body, width, border, band)
-	for i := range out {
-		out[i] = " " + out[i]
-	}
-	if len(out) > height {
-		out = out[:height]
-	}
-	return out
+	frame := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(border)).Padding(1, 3).Width(width + 6)
+	return frame.Render(strings.Join(body, "\n"))
 }

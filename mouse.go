@@ -20,7 +20,7 @@ func (m model) listStart() int {
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.helpMode || m.palette != nil || m.confirmPR != nil {
+	if m.helpMode || m.palette != nil || m.confirmPR != nil || m.merge != nil {
 		return m, nil
 	}
 	if m.detail != nil {
@@ -56,7 +56,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 func (m model) handleDetailMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	v := m.detail
-	if v.picker != nil || v.merge != nil {
+	if v.picker != nil {
 		return m, nil
 	}
 	p := v.pane()

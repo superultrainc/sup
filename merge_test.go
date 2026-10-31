@@ -12,7 +12,7 @@ import (
 func TestMergeDialogRules(t *testing.T) {
 	d := &prDetail{State: "OPEN", MergeStateStatus: "CLEAN"}
 	d.Repository.MergeCommitAllowed, d.Repository.RebaseMergeAllowed = true, true
-	md := newMergeDialog(d)
+	md := newMergeDialog(PR{}, d)
 
 	// Squash isn't allowed here, so the default falls back to the first allowed method.
 	if m, ok := md.selectedMethod(d); !ok || m.id != "MERGE" {
@@ -146,5 +146,50 @@ func TestDemoActionsStick(t *testing.T) {
 	}
 	if rows := demoRows([]PR{drafted}); len(rows) != 1 || !rows[0].IsDraft {
 		t.Fatalf("a demo PR converted to draft should stay a draft")
+	}
+}
+
+func TestMergeModal(t *testing.T) {
+	demoMode = true
+	t.Cleanup(func() { demoMode = false; demoActions = sync.Map{} })
+	m := initialModel()
+	m.width, m.height = 120, 40
+	m.prs = mockPRs()
+	m.applyFilter()
+	m.loading, m.visibleCount = false, len(m.filtered)
+	pr := m.filtered[0]
+	m.cacheEntry(prKey(pr)).detail = mockPRDetail(pr)
+
+	m = press(t, m, "m")
+	if m.merge == nil || m.detail != nil || !strings.Contains(ansi.Strip(m.View()), "Merge PR #") {
+		t.Fatalf("m should open the merge modal over the list")
+	}
+	m = press(t, m, "esc")
+	if m.merge != nil {
+		t.Fatalf("esc should close the merge modal")
+	}
+
+	m = press(t, m, "m")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(model)
+	if m.merge != nil || m.merging[prKey(pr)] != pr.Number || !strings.Contains(ansi.Strip(m.View()), "Merging #") {
+		t.Fatalf("y should close the modal and merge in the background")
+	}
+	if m = press(t, m, "j"); m.cursor != 1 {
+		t.Fatalf("navigation should work while a merge is in flight")
+	}
+	for _, c := range cmd().(tea.BatchMsg) {
+		if msg, ok := c().(mergeDoneMsg); ok {
+			next, _ = m.Update(msg)
+			m = next.(model)
+		}
+	}
+	if len(m.merging) != 0 || !strings.HasPrefix(m.actionStatus, "✓ Merged") {
+		t.Fatalf("the merge should finish and report, got %q", m.actionStatus)
+	}
+	for _, p := range m.prs {
+		if prKey(p) == prKey(pr) {
+			t.Fatalf("merged PR should leave the list")
+		}
 	}
 }

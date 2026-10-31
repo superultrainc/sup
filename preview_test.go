@@ -52,3 +52,16 @@ func TestPreviewNeedsWidth(t *testing.T) {
 		t.Fatalf("narrow terminals should keep the full list")
 	}
 }
+
+func TestPreviewLoadsImages(t *testing.T) {
+	m := previewModel(t, 150)
+	d := m.cacheEntry(prKey(m.filtered[0])).detail
+	d.Body = "![shot](https://example.com/preview-test.png)"
+	t.Cleanup(func() { delete(imageStore, "https://example.com/preview-test.png") })
+	if cmd := m.handleHover(hoverMsg{seq: m.hoverSeq, pr: m.filtered[0]}); cmd == nil {
+		t.Fatalf("resting on a PR in preview should load its images")
+	}
+	if e := imageStore["https://example.com/preview-test.png"]; e == nil || !e.loading {
+		t.Fatalf("image should be queued, got %+v", e)
+	}
+}

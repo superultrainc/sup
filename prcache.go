@@ -162,6 +162,9 @@ func (m *model) handleHover(msg hoverMsg) tea.Cmd {
 	_, inMemory := m.cache[key]
 	e := m.cacheEntry(key)
 	cmds := append(m.fetchMissing(msg.pr, e), m.ensureParsed(key, e))
+	if m.previewActive() {
+		cmds = append(cmds, queueImages(e.detail, false)) // so screenshots fill in while previewing
+	}
 	if !inMemory {
 		cmds = append(cmds, loadDiskCacheCmd(msg.pr))
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,5 +41,26 @@ func TestRejectedReviewKeepsItsText(t *testing.T) {
 	path := filepath.Join(cacheDir(), "last-review.md")
 	if data, err := os.ReadFile(path); err != nil || string(data) != "please rename this" || !strings.Contains(m.actionStatus, path) {
 		t.Fatalf("text should be saved and its path shown, got %q, status %q", data, m.actionStatus)
+	}
+}
+
+func TestFindRepoPathChecksOrigin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SUP_DEV_DIR", filepath.Join(home, "other"))
+	clone := func(dir, origin string) {
+		if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
+			t.Fatalf("git init: %s", out)
+		}
+		exec.Command("git", "-C", dir, "remote", "add", "origin", origin).Run()
+	}
+	clone(filepath.Join(home, "other", "api"), "git@github.com:someone-else/api.git")
+	want := filepath.Join(home, "Development", "api")
+	clone(want, "git@github.com-work:acme/api.git")
+	if got := findRepoPath("acme", "api"); got != want {
+		t.Fatalf("should skip the other org's clone, got %q", got)
+	}
+	if got := findRepoPath("nobody", "api"); got != "" {
+		t.Fatalf("no clone of nobody/api exists, got %q", got)
 	}
 }

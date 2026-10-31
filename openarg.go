@@ -99,7 +99,11 @@ func slugFromRemote(url string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("origin is not a GitHub remote: %s", url)
 	}
-	return strings.TrimSuffix(strings.Trim(path, ":/"), ".git"), nil
+	// Skip an SSH host alias suffix, as in git@github.com-work:org/repo.
+	if i := strings.IndexAny(path, ":/"); i >= 0 {
+		path = path[i+1:]
+	}
+	return strings.TrimSuffix(strings.Trim(path, "/"), ".git"), nil
 }
 
 // completions lists PRs as zsh _describe entries: N for a given repo, else repo#N (owner/ only when the name is ambiguous).

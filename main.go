@@ -537,30 +537,29 @@ func findWorktreePath(repoPath, branch string) string {
 }
 
 // findRepoPath searches for a repo in common locations
-func findRepoPath(repoName string) string {
+// findRepoPath finds a local clone of owner/name, checking its origin so a
+// same-named repo from another org isn't picked.
+func findRepoPath(owner, name string) string {
 	home := os.Getenv("HOME")
-
-	// Check SUP_DEV_DIR first if set
+	var candidates []string
 	if devDir := os.Getenv("SUP_DEV_DIR"); devDir != "" {
-		path := filepath.Join(devDir, repoName)
-		if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
-			return path
-		}
+		candidates = append(candidates, filepath.Join(devDir, name))
 	}
-
-	// Search common locations
 	for _, dir := range defaultDevDirs {
-		var path string
-		if dir == "" {
-			path = filepath.Join(home, repoName)
-		} else {
-			path = filepath.Join(home, dir, repoName)
+		candidates = append(candidates, filepath.Join(home, dir, name))
+	}
+	for _, path := range candidates {
+		if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+			continue
 		}
-		if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+		out, err := exec.Command("git", "-C", path, "remote", "get-url", "origin").Output()
+		if err != nil {
+			continue
+		}
+		if slug, err := slugFromRemote(strings.TrimSpace(string(out))); err == nil && strings.EqualFold(slug, owner+"/"+name) {
 			return path
 		}
 	}
-
 	return ""
 }
 
@@ -2334,10 +2333,11 @@ func main() {
 
 	if m.selected != nil {
 		pr := m.selected
-		repoPath := findRepoPath(pr.Repository.Name)
+		slug := pr.Repository.Owner.Login + "/" + pr.Repository.Name
+		repoPath := findRepoPath(pr.Repository.Owner.Login, pr.Repository.Name)
 
 		if repoPath == "" {
-			fmt.Fprintf(os.Stderr, "Repo '%s' not found in common locations.\n", pr.Repository.Name)
+			fmt.Fprintf(os.Stderr, "No clone of %s found in common locations.\n", slug)
 			fmt.Fprintf(os.Stderr, "Clone it: gh repo clone %s/%s\n",
 				pr.Repository.Owner.Login, pr.Repository.Name)
 			fmt.Fprintf(os.Stderr, "Or set SUP_DEV_DIR to your repos directory.\n")
@@ -2350,14 +2350,14 @@ func main() {
 			fmt.Printf("Branch '%s' already checked out at %s\n", pr.HeadRefName, wtPath)
 			targetPath = wtPath
 		} else {
-			// Change to repo directory and run gh pr checkout
 			if err := os.Chdir(repoPath); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: could not cd to %s: %v\n", repoPath, err)
 				os.Exit(1)
 			}
 
 			fmt.Printf("Checking out PR #%d in %s...\n", pr.Number, repoPath)
-			cmd := exec.Command("gh", "pr", "checkout", fmt.Sprintf("%d", pr.Number), "--force")
+			// No --force: it would reset a local branch and drop unpushed commits.
+			cmd := exec.Command("gh", "pr", "checkout", fmt.Sprintf("%d", pr.Number), "--repo", slug)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {

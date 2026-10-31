@@ -856,6 +856,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case checkoutMsg:
+		if pr, ok := m.currentPR(); ok {
+			m.selected = &pr
+			m.quitting = true
+			return m, tea.Quit
+		}
+		return m, nil
+
 	case paletteTickMsg:
 		if p := m.palette; p != nil && p.frame < paletteFrames {
 			p.frame++
@@ -1378,15 +1386,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "enter":
-		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-			m.selected = &m.filtered[m.cursor]
-			m.quitting = true
-			return m, tea.Quit
-		}
-		return m, nil
-
-	case "v":
+	case "enter", "v":
 		if pr, ok := m.currentPR(); ok {
 			return m, m.openDetail(pr)
 		}
@@ -1674,8 +1674,7 @@ func (m model) helpSections() []helpSection {
 			{"r", "My reviews"},
 		}},
 		{"Actions", [][2]string{
-			{"Enter", "Checkout PR"},
-			{"v", "Open PR view"},
+			{"Enter", "Open PR view"},
 			{"m", "Merge PR"},
 			{"d", "Open the PR's diff"},
 			{"A", "Approve"},
@@ -2030,7 +2029,7 @@ func (m model) view() string {
 	}
 
 	s.WriteString("\n")
-	hints := "  ctrl+k: commands · /: filter · space: preview · enter: checkout · ?: help"
+	hints := "  ctrl+k: commands · /: filter · space: preview · enter: open · ?: help"
 	if m.compactList {
 		hints = "  space: close · ctrl+d/u: scroll · v: open"
 	}

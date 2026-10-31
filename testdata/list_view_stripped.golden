@@ -24,4 +24,4 @@
   [Commented] repo-4                      #119  Fix thing 19                         author19      reviewer-w... feature/branch-19               +247     -133
 
   20 PRs
-  ctrl+k: commands · /: filter · space: preview · enter: checkout · ?: help
+  ctrl+k: commands · /: filter · space: preview · enter: open · ?: help

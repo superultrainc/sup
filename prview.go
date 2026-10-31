@@ -364,7 +364,6 @@ type prDetailView struct {
 	collapsed   map[string]bool // per-path override of the default collapse rule
 	width       int
 	picker      *reviewerPicker // non-nil while the reviewer picker is open
-	merge       *mergeDialog    // non-nil while the merge dialog is open
 	search      *detailSearch   // non-nil while a `/` search is being typed or is active
 	dirty       [tabCount]bool  // panes needing a render before they're shown
 }
@@ -407,7 +406,7 @@ func (v *prDetailView) mainWidth(tab int) int {
 func (v *prDetailView) pane() *detailPane { return &v.panes[v.tab] }
 
 func (v *prDetailView) bodyHeight(termHeight int) int {
-	return max(termHeight-detailHeaderHeight-2, 3) // 2 footer rows
+	return max(termHeight-v.headerHeight()-2, 3) // 2 footer rows
 }
 
 func (v *prDetailView) maxScroll(termHeight int) int {
@@ -578,9 +577,6 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.detail.picker != nil {
 		return m.handlePickerInput(msg)
 	}
-	if m.detail.merge != nil {
-		return m.handleMergeInput(msg)
-	}
 	if s := m.detail.search; s != nil && s.typing {
 		return m.handleSearchInput(msg)
 	}
@@ -667,9 +663,7 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.rebuildFilesKeepingPlace()
 		}
 	case "m":
-		v.merge = newMergeDialog(v.detail)
-		m.actionStatus = ""
-		return m, nil
+		return m, m.openMerge(v.pr)
 	case "r":
 		v.picker = newReviewerPicker(v.pr, v.detail)
 		m.actionStatus = ""
@@ -787,6 +781,9 @@ func mockPRDetail(pr PR) *prDetail {
 		d.Reviews.Nodes = nil
 		d.MergeStateStatus = "DRAFT"
 		rollup.State, rollup.Contexts.Nodes[2].Conclusion, rollup.Contexts.Nodes[2].Status = "PENDING", "", "IN_PROGRESS"
+	}
+	if c, ok := demoContentFor(pr); ok {
+		applyDemoContent(d, pr, c)
 	}
 	return d
 }

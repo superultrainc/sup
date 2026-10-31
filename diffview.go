@@ -696,7 +696,7 @@ func fetchPatchCmd(pr PR, parse bool) tea.Cmd {
 
 func fetchPRPatch(pr PR) ([]byte, error) {
 	if demoMode {
-		return []byte(mockPatch), nil
+		return []byte(demoPatch(pr)), nil
 	}
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", githubAPI, pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
 	get := func() (*http.Response, error) {

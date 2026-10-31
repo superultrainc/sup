@@ -66,11 +66,11 @@ type checkoutMsg struct{}
 
 // textInputActive is true while a prompt owns typed keys, so ctrl+k stays theirs.
 func (m model) textInputActive() bool {
-	if m.filterMode || m.confirmAction != "" {
+	if m.filterMode || m.confirmAction != "" || m.merge != nil {
 		return true
 	}
 	v := m.detail
-	return v != nil && (v.picker != nil || v.merge != nil || (v.search != nil && v.search.typing))
+	return v != nil && (v.picker != nil || (v.search != nil && v.search.typing))
 }
 
 func (m model) handlePaletteInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

@@ -156,16 +156,29 @@ func TestReviewerFilterAloneFilters(t *testing.T) {
 func TestStatusCycleWrapsThroughUnfiltered(t *testing.T) {
 	m := sampleModel()
 	for i := range statusFilters {
-		m.cycleStatusFilter()
+		m.cycleStatusFilter(1)
 		if m.statusFilterIndex != i {
 			t.Fatalf("step %d: got index %d, want %d", i, m.statusFilterIndex, i)
 		}
 	}
-	m.cycleStatusFilter()
+	m.cycleStatusFilter(1)
 	if m.statusFilterIndex != -1 {
 		t.Fatalf("expected cycle to clear, got %d", m.statusFilterIndex)
 	}
 	assertPRs(t, m.filtered, 1, 2, 3, 4)
+}
+
+func TestStatusCycleBackwards(t *testing.T) {
+	m := sampleModel()
+	m.visibleCount = len(m.filtered)
+	m = press(t, m, "S")
+	if m.statusFilterIndex != len(statusFilters)-1 {
+		t.Fatalf("S from unfiltered should go to the last status, got %d", m.statusFilterIndex)
+	}
+	m = press(t, m, "s")
+	if m.statusFilterIndex != -1 {
+		t.Fatalf("s after S should clear the filter, got %d", m.statusFilterIndex)
+	}
 }
 
 func TestTypedStatusNameDrivesStatusCycle(t *testing.T) {

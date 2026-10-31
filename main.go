@@ -285,6 +285,8 @@ type model struct {
 	actionStatus      string            // transient success/error feedback for review actions
 	helpMode          bool              // true while the help overlay is showing
 	palette           *commandPalette   // non-nil while the command palette is open
+	merge             *mergeDialog      // non-nil while the merge modal is open
+	merging           map[string]int    // prKey -> number of merges in flight
 	previewOn         bool              // split the list with a preview of the cursor's PR
 	preview           *prDetailView     // the preview pane's view, kept separate from detail
 	compactList       bool              // render the narrow list used beside the preview
@@ -840,6 +842,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case mergeDoneMsg:
 		return m, m.handleMergeDone(msg)
 
+	case branchDeletedMsg:
+		if msg.err != nil {
+			m.actionStatus = "Error: " + msg.err.Error()
+		}
+		return m, nil
+
 	case startRefreshMsg:
 		return m, tea.Batch(m.startRefresh(), m.schedulePrefetch(), m.enqueueWarm())
 
@@ -885,8 +893,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinnerTickMsg:
 		// Spin only while something is loading.
 		if m.loading || m.refreshing || m.actionPending || (m.detail != nil && ((m.detail.loading && m.detail.detail == nil) || (m.detail.diffLoading && m.detail.diff == nil) ||
-			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)) ||
-			(m.detail.merge != nil && m.detail.merge.saving))) {
+			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)))) ||
+			(m.merge != nil && m.mergeDetail() == nil) || len(m.merging) > 0 {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
 			return m, spinnerTick()
 		}
@@ -974,6 +982,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.palette != nil {
 			return m.handlePaletteInput(msg)
+		}
+		if m.merge != nil {
+			return m.handleMergeInput(msg)
 		}
 		if msg.String() == "ctrl+k" && !m.textInputActive() {
 			m.helpMode = false
@@ -1307,7 +1318,10 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Filter cycling keys run before the transient-feedback reset below.
 	switch msg.String() {
 	case "s":
-		m.cycleStatusFilter()
+		m.cycleStatusFilter(1)
+		return m, nil
+	case "S":
+		m.cycleStatusFilter(-1)
 		return m, nil
 	case "p":
 		m.cycleRepoFilter(1)
@@ -1404,10 +1418,8 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "m":
-		if pr, ok := m.currentPR(); ok && m.detail == nil {
-			cmd := m.openDetail(pr)
-			m.detail.merge = newMergeDialog(m.detail.detail)
-			return m, cmd
+		if pr, ok := m.currentPR(); ok {
+			return m, m.openMerge(pr)
 		}
 		return m, nil
 
@@ -1506,15 +1518,15 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-var statusFilters = []string{"draft", "approved", "denied", "review", "commented", "open"}
+var statusFilters = []string{"approved", "denied", "review", "commented", "open", "draft"}
 
-func (m *model) cycleStatusFilter() {
+func (m *model) cycleStatusFilter(delta int) {
 	n := len(statusFilters) + 1 // last position is "no filter"
 	pos := m.statusFilterIndex
 	if pos < 0 {
 		pos = len(statusFilters)
 	}
-	pos = (pos + 1) % n
+	pos = ((pos+delta)%n + n) % n
 	if pos == len(statusFilters) {
 		m.statusFilterIndex = -1
 	} else {
@@ -1676,7 +1688,7 @@ func (m model) helpSections() []helpSection {
 		}},
 		{"Filter", [][2]string{
 			{"/", "Open filter"},
-			{"s", "Cycle status filter"},
+			{"s / S", "Cycle status (fwd / back)"},
 			{"p / P", "Cycle repo (fwd / back)"},
 			{"#repo", "Filter by repo"},
 			{"@user", "Filter by reviewer"},
@@ -1841,6 +1853,11 @@ func (m model) View() string {
 }
 
 func (m model) view() string {
+	if m.merge != nil {
+		under := m // render the screen underneath without the modal
+		under.merge = nil
+		return overlayCenter(under.view(), m.mergeView(), m.width, m.height)
+	}
 	if m.confirmPR != nil {
 		under := m // render the screen underneath without the modal
 		under.confirmAction, under.confirmPR = "", nil
@@ -2027,6 +2044,9 @@ func (m model) view() string {
 			s.WriteString(fmt.Sprintf("\n  %d of %d PRs", len(m.filtered), len(m.prs)))
 		} else {
 			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))
+		}
+		if t := m.mergingText(); t != "" {
+			s.WriteString(lp.loading.Render("  " + t))
 		}
 		if m.actionPending {
 			s.WriteString(lp.loading.Render("  " + spinnerFrames[m.spinnerFrame] + " Submitting review..."))

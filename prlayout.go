@@ -100,6 +100,35 @@ func (v *prDetailView) tabSpans() [tabCount][2]int {
 	return spans
 }
 
+// titleLines splits a title too long for one header line (beside the number and
+// repo) into a full-width first line and a second line that keeps them.
+func (v *prDetailView) titleLines() (first, rest string) {
+	title := v.pr.Title
+	if v.detail != nil {
+		title = v.detail.Title
+	}
+	w := v.width - 1
+	side := lipgloss.Width(fmt.Sprintf("#%d", v.pr.Number)) + lipgloss.Width(v.pr.Repository.Owner.Login+"/"+v.pr.Repository.Name) + 5
+	if displayWidth(title) <= w-side {
+		return title, ""
+	}
+	words := strings.Fields(title)
+	for i := len(words) - 1; i > 0; i-- {
+		if head := strings.Join(words[:i], " "); displayWidth(head) <= w-2 {
+			return head, strings.Join(words[i:], " ")
+		}
+	}
+	return title, ""
+}
+
+// headerHeight is the PR header's height: title, state line, tabs and rule.
+func (v *prDetailView) headerHeight() int {
+	if _, rest := v.titleLines(); rest != "" {
+		return detailHeaderHeight + 1
+	}
+	return detailHeaderHeight
+}
+
 func (m model) detailHeader() []string {
 	v := m.detail
 	d := v.detail
@@ -117,7 +146,13 @@ func (m model) detailHeader() []string {
 	slug := muted(v.pr.Repository.Owner.Login + "/" + v.pr.Repository.Name)
 	num := muted(fmt.Sprintf("#%d", v.pr.Number))
 	titleW := w - 2 - lipgloss.Width(num) - lipgloss.Width(slug) - 3
-	line1 := rightAlign(" "+prTitleStyle.Render(truncate(title, max(titleW, 10)))+" "+num, slug, w)
+	var titleRows []string
+	if first, rest := v.titleLines(); rest != "" {
+		titleRows = []string{" " + prTitleStyle.Render(first),
+			rightAlign(" "+prTitleStyle.Render(truncate(rest, max(titleW, 10)))+" "+num, slug, w)}
+	} else {
+		titleRows = []string{rightAlign(" "+prTitleStyle.Render(truncate(title, max(titleW, 10)))+" "+num, slug, w)}
+	}
 
 	branch := func(name string) string { return chip(name, th.branchFg, th.branchBg) }
 	verb := " wants to merge "
@@ -162,7 +197,7 @@ func (m model) detailHeader() []string {
 	if rw := lipgloss.Width(rule); rw < w {
 		rule += sty(th.divider, "", false, false).Render(strings.Repeat("─", w-rw))
 	}
-	return []string{line1, line2, tabs, rule}
+	return append(titleRows, line2, tabs, rule)
 }
 
 func (m model) detailView() string {
@@ -177,8 +212,6 @@ func (m model) detailView() string {
 	switch {
 	case v.picker != nil:
 		rows = m.pickerView(bodyH)
-	case v.merge != nil:
-		rows = m.mergeView(bodyH)
 	case v.tab != tabFiles && v.detail == nil:
 		rows = []string{"", m.placeholder(v.err, "Loading PR...")}
 	case v.tab == tabFiles && v.diff == nil:
@@ -257,6 +290,8 @@ func (m model) detailFooter() string {
 		status = v.searchStatus()
 	case m.actionStatus != "":
 		status = " " + banner(m.actionStatus)
+	case m.mergingText() != "":
+		status = reviewRequestedStyle.Render(" " + m.mergingText())
 	case v.err != nil && v.detail != nil:
 		status = changesRequestedStyle.Render(" Reload failed: " + v.err.Error())
 	}
@@ -271,8 +306,6 @@ func (m model) detailFooter() string {
 		help = " type to search · enter keep · esc cancel"
 	case v.picker != nil:
 		help = " ↑/↓ move · space toggle · type to filter · enter save · esc cancel"
-	case v.merge != nil:
-		help = " ↑/↓ method · b delete branch · a auto-merge · enter merge · esc cancel"
 	default:
 		help = " ctrl+k commands · / search · tab next tab · esc back · ? help"
 	}

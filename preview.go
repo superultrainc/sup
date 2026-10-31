@@ -39,6 +39,9 @@ func (m *model) syncPreview() {
 	}
 	v.width = w
 	v.loading = v.detail == nil
+	if v.detail != nil {
+		v.ensure() // re-render tabs invalidated after images were freed
+	}
 	v.clampScroll(m.height) // a rebuild at a new width can leave fewer lines
 }
 

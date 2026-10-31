@@ -40,3 +40,31 @@ func TestKittyImageLines(t *testing.T) {
 		t.Fatalf("re-rendering the same size should not retransmit")
 	}
 }
+
+func TestKittyFreesOldImagesAndResends(t *testing.T) {
+	defer func(b int) {
+		kittyBudget, kittyPending, kittyIDs, kittyImages, kittyBytes = b, nil, map[string]int{}, map[int]*kittyImage{}, 0
+	}(kittyBudget)
+	img := image.NewNRGBA(image.Rect(0, 0, 100, 100)) // 40 KB decoded
+	kittyBudget = 100 << 10
+	for _, key := range []string{"a", "b", "c"} {
+		kittyTick++
+		kittyImageLines(key, &imageEntry{img: img, kittyB64: "x"}, 60, 40)
+	}
+	if _, ok := kittyIDs["a\x0010x5"]; ok || len(kittyImages) != 2 || kittyBytes > kittyBudget {
+		t.Fatalf("oldest image should be freed, have %d images, %d bytes", len(kittyImages), kittyBytes)
+	}
+	if !strings.Contains(strings.Join(kittyPending, ""), "a=d,d=I,i=") {
+		t.Fatal("freed image should be deleted in the terminal")
+	}
+	// Images used in the current update are never freed, even over budget.
+	kittyTick++
+	for _, key := range []string{"d", "e", "f"} {
+		kittyImageLines(key, &imageEntry{img: img, kittyB64: "x"}, 60, 40)
+	}
+	for _, key := range []string{"d", "e", "f"} {
+		if _, ok := kittyIDs[key+"\x0010x5"]; !ok {
+			t.Fatalf("%s was freed while in use", key)
+		}
+	}
+}

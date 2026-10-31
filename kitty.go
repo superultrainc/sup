@@ -30,7 +30,21 @@ var (
 	kittyIDs            = map[string]int{} // url+size -> image id
 	kittyNextID         = 1
 	kittyFlushScheduled bool
+
+	// Terminals silently drop old images past a memory limit (Rex keeps about
+	// 128 MB), so sup frees its least recently used ones first and resends on demand.
+	kittyImages    = map[int]*kittyImage{}
+	kittyBytes     int
+	kittyBudget    = 96 << 20
+	kittyTick      int // bumped every Update; images used in this one are never freed
+	kittyEvictions int // bumped on every free, so views holding placeholders re-render
 )
+
+type kittyImage struct {
+	key   string
+	bytes int // decoded size in the terminal
+	used  int // kittyTick of last use
+}
 
 // detectImageMode asks the terminal whether it supports kitty graphics, before
 // the TUI owns stdin. SUP_IMAGES=kitty|blocks overrides detection.
@@ -146,15 +160,23 @@ func kittyImageLines(key string, e *imageEntry, maxCols, maxRows int) []string {
 		cols = max(w*rows*cellPxH/(h*cellPxW), 1)
 	}
 
-	id, ok := kittyIDs[fmt.Sprintf("%s\x00%dx%d", key, cols, rows)]
-	if !ok {
+	sizeKey := fmt.Sprintf("%s\x00%dx%d", key, cols, rows)
+	id, ok := kittyIDs[sizeKey]
+	if ok {
+		kittyImages[id].used = kittyTick
+	} else {
 		id = kittyNextID
 		kittyNextID++
-		kittyIDs[fmt.Sprintf("%s\x00%dx%d", key, cols, rows)] = id
+		kittyIDs[sizeKey] = id
+		bytes := w * h * 4 * (1 + len(e.frames))
 		if b64 == "" {
 			tw, th := min(cols*cellPxW, w), min(rows*cellPxH, h)
 			b64 = kittyEncode(resample(img, tw, th))
+			bytes = tw * th * 4
 		}
+		kittyFree(bytes)
+		kittyImages[id] = &kittyImage{sizeKey, bytes, kittyTick}
+		kittyBytes += bytes
 		kittyPending = append(kittyPending, kittyTransmit(id, b64, cols, rows))
 		if len(e.frames) > 0 && b64 == e.kittyB64 {
 			kittyPending = append(kittyPending, kittyAnimation(id, e))
@@ -175,6 +197,27 @@ func kittyImageLines(key string, e *imageEntry, maxCols, maxRows int) []string {
 		out[r] = sb.String()
 	}
 	return out
+}
+
+// kittyFree deletes least recently used images until need more bytes fit the budget.
+func kittyFree(need int) {
+	for kittyBytes+need > kittyBudget {
+		oldest := 0
+		for id, im := range kittyImages {
+			if im.used < kittyTick && (oldest == 0 || im.used < kittyImages[oldest].used) {
+				oldest = id
+			}
+		}
+		if oldest == 0 {
+			return
+		}
+		im := kittyImages[oldest]
+		delete(kittyImages, oldest)
+		delete(kittyIDs, im.key)
+		kittyBytes -= im.bytes
+		kittyEvictions++
+		kittyPending = append(kittyPending, fmt.Sprintf("\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", oldest))
+	}
 }
 
 // kittyEncode returns img as a base64 PNG; kitty scales it into any placement box.

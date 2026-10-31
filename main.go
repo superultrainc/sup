@@ -325,6 +325,7 @@ type editorDoneMsg struct {
 type reviewSubmittedMsg struct {
 	action string
 	pr     PR
+	body   string // kept so a rejected review's text isn't lost
 	err    error
 }
 
@@ -633,7 +634,7 @@ func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 			review["body"] = body
 		}
 		_, err := githubREST("POST", fmt.Sprintf("%s/pulls/%d/reviews", repoPath(pr), pr.Number), review)
-		return reviewSubmittedMsg{action: action, pr: pr, err: err}
+		return reviewSubmittedMsg{action: action, pr: pr, body: body, err: err}
 	}
 }
 
@@ -915,6 +916,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reviewSubmittedMsg:
 		if msg.err != nil {
 			m.actionStatus = "Error: " + msg.err.Error()
+			if msg.body != "" {
+				path := filepath.Join(cacheDir(), "last-review.md")
+				if os.WriteFile(path, []byte(msg.body), 0600) == nil {
+					m.actionStatus += " · your text is saved in " + path
+				}
+			}
 			return m, nil
 		}
 		// Refresh just this PR so its badge reflects the new review state.

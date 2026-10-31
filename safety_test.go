@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -25,5 +27,18 @@ func TestControlCharactersAreStripped(t *testing.T) {
 	files := parseUnifiedDiff("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-old\n+new\x1b]0;pwned\x07\n")
 	if line := files[0].hunks[0].lines[1].text; strings.ContainsAny(line, "\x1b\x07") {
 		t.Fatalf("diff line kept control characters: %q", line)
+	}
+}
+
+func TestRejectedReviewKeepsItsText(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	pr := testPR("sup", "neil", 7, false, "")
+	fakeGitHub(t, map[string]string{"POST /repos/superultrainc/sup/pulls/7/reviews": `422 {"message":"Can not request changes on your own pull request"}`})
+	msg := submitReviewCmd("request-changes", pr, "please rename this")()
+	next, _ := initialModel().Update(msg)
+	m := next.(model)
+	path := filepath.Join(cacheDir(), "last-review.md")
+	if data, err := os.ReadFile(path); err != nil || string(data) != "please rename this" || !strings.Contains(m.actionStatus, path) {
+		t.Fatalf("text should be saved and its path shown, got %q, status %q", data, m.actionStatus)
 	}
 }

@@ -222,17 +222,28 @@ func pruneImageCache() {
 	}
 }
 
+// rawFileURL maps a github.com blob or raw link to raw.githubusercontent.com,
+// since github.com rejects API tokens and 404s for private repos.
+func rawFileURL(u *url.URL) *url.URL {
+	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 4)
+	if u.Host != "github.com" || len(parts) < 4 || (parts[2] != "blob" && parts[2] != "raw") {
+		return u
+	}
+	return &url.URL{Scheme: "https", Host: "raw.githubusercontent.com", Path: "/" + parts[0] + "/" + parts[1] + "/" + parts[3]}
+}
+
 func downloadImage(raw string) ([]byte, error) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, fmt.Errorf("bad image url")
 	}
-	req, err := http.NewRequest("GET", raw, nil)
+	u = rawFileURL(u)
+	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 	// Only GitHub's own hosts get the token; signed URLs carry their own auth.
-	if u.Host == "github.com" || u.Host == "api.github.com" {
+	if u.Host == "github.com" || u.Host == "api.github.com" || u.Host == "raw.githubusercontent.com" {
 		req.Header.Set("Authorization", "Bearer "+ghToken)
 	}
 	resp, err := httpClient.Do(req)

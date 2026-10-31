@@ -572,12 +572,38 @@ func fetchUserOrgs() ([]string, error) {
 func (m model) confirmPrompt() string {
 	switch m.confirmAction {
 	case "draft":
-		return fmt.Sprintf("Convert PR #%d to draft? (y/n)", m.confirmPR.Number)
+		return fmt.Sprintf("Convert PR #%d to draft?", m.confirmPR.Number)
 	case "ready":
-		return fmt.Sprintf("Mark PR #%d ready for review? (y/n)", m.confirmPR.Number)
+		return fmt.Sprintf("Mark PR #%d ready for review?", m.confirmPR.Number)
 	}
 	verb := map[string]string{"approve": "Approve", "close": "Close"}[m.confirmAction]
-	return fmt.Sprintf("%s PR #%d? (y/n)", verb, m.confirmPR.Number)
+	return fmt.Sprintf("%s PR #%d?", verb, m.confirmPR.Number)
+}
+
+// confirmView is the centered modal asking to confirm m.confirmAction.
+func (m model) confirmView() string {
+	th := currentDiffTheme()
+	pr := *m.confirmPR
+	color, label := th.threadBorder, map[string]string{"draft": "Convert to draft", "ready": "Mark ready"}[m.confirmAction]
+	switch m.confirmAction {
+	case "approve":
+		color, label = th.addBar, "Approve"
+	case "close":
+		color, label = th.delBar, "Close PR"
+	}
+	width := min(56, max(m.width-6, 30))
+	muted := sty(th.muted, "", false, false)
+	lines := []string{
+		sty(color, "", true, false).Render(m.confirmPrompt()),
+		"",
+		sty(th.text, "", true, false).Render(truncate(pr.Title, width)),
+		muted.Render(truncate(pr.Repository.Owner.Login+"/"+pr.Repository.Name+" · "+pr.Author.Login, width)),
+		"",
+		sty("16", color, true, false).Render(" y ") + " " + sty(th.text, "", false, false).Render(label) + "    " +
+			sty(th.text, th.chipBg, false, false).Render(" esc ") + " " + muted.Render("Cancel"),
+	}
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(color)).Padding(1, 3).Width(width + 6)
+	return box.Render(strings.Join(lines, "\n"))
 }
 
 func reviewDoneText(action string, pr PR) string {
@@ -1238,7 +1264,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Confirmation prompts intercept input before any other handling.
 	if m.confirmAction != "" {
 		switch msg.String() {
-		case "y", "Y":
+		case "y", "Y", "enter":
 			action := m.confirmAction
 			pr := *m.confirmPR
 			m.confirmAction = ""
@@ -1252,7 +1278,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Optimistic: confirm now; an error replaces this if GitHub rejects it.
 			m.actionStatus = reviewDoneText(action, pr)
 			return m, submitReviewCmd(action, pr, "")
-		default:
+		case "n", "N", "esc", "q":
 			m.confirmAction = ""
 			m.confirmPR = nil
 		}
@@ -1551,6 +1577,16 @@ func statusLabelForFilter(pr PR) string {
 	}
 }
 
+// banner shows a prompt or action result as a colored pill so it stands out.
+func banner(text string) string {
+	fg, bg := "16", "35" // success
+	switch {
+	case strings.HasPrefix(text, "Error"), strings.Contains(text, "cancelled"):
+		fg, bg = "15", "160"
+	}
+	return sty(fg, bg, true, false).Render(" " + text + " ")
+}
+
 // statusBadgeLabel is the display text of the list status badge.
 func statusBadgeLabel(pr PR) string { return badgeLabels[statusKind(pr)] }
 
@@ -1795,6 +1831,11 @@ func (m model) View() string {
 }
 
 func (m model) view() string {
+	if m.confirmPR != nil {
+		under := m // render the screen underneath without the modal
+		under.confirmAction, under.confirmPR = "", nil
+		return overlayCenter(under.view(), m.confirmView(), m.width, m.height)
+	}
 	if m.palette != nil {
 		under := m // render the screen underneath without the palette
 		under.palette = nil
@@ -1849,15 +1890,6 @@ func (m model) view() string {
 		filterLine = "  Filter: " + strings.Join(parts, " ")
 	}
 	switch {
-	case m.actionPending:
-		spinner := spinnerFrames[m.spinnerFrame]
-		s.WriteString(lp.loading.Render("  " + spinner + " Submitting review..."))
-	case m.actionStatus != "":
-		style := approvedStyle
-		if strings.HasPrefix(m.actionStatus, "Error") || strings.Contains(m.actionStatus, "cancelled") {
-			style = changesRequestedStyle
-		}
-		s.WriteString(style.Render("  " + m.actionStatus))
 	case filterLine == "  ":
 		s.WriteString(filterLine)
 	default:
@@ -1986,8 +2018,10 @@ func (m model) view() string {
 		} else {
 			s.WriteString(fmt.Sprintf("\n  %d PRs", len(m.prs)))
 		}
-		if m.confirmPR != nil {
-			s.WriteString(lp.filter.Render("  " + m.confirmPrompt()))
+		if m.actionPending {
+			s.WriteString(lp.loading.Render("  " + spinnerFrames[m.spinnerFrame] + " Submitting review..."))
+		} else if m.actionStatus != "" {
+			s.WriteString("  " + banner(m.actionStatus))
 		} else if m.refreshing {
 			s.WriteString(lp.loading.Render("  " + spinnerFrames[m.spinnerFrame] + " Refreshing"))
 		} else if status := m.freshness(); status != "" {

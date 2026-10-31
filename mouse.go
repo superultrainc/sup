@@ -20,13 +20,13 @@ func (m model) listStart() int {
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.helpMode || m.palette != nil {
+	if m.helpMode || m.palette != nil || m.confirmPR != nil {
 		return m, nil
 	}
 	if m.detail != nil {
 		return m.handleDetailMouse(msg)
 	}
-	if m.filterMode || m.confirmAction != "" {
+	if m.filterMode {
 		return m, nil
 	}
 	if m.previewActive() && msg.X > m.previewListWidth() {

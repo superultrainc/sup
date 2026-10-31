@@ -251,18 +251,12 @@ func (m model) detailFooter() string {
 	v := m.detail
 	var status string
 	switch {
-	case m.confirmPR != nil:
-		status = filterStyle.Render(" " + m.confirmPrompt())
 	case m.actionPending:
 		status = reviewRequestedStyle.Render(" " + spinnerFrames[m.spinnerFrame] + " Submitting review...")
 	case v.search != nil:
 		status = v.searchStatus()
 	case m.actionStatus != "":
-		style := approvedStyle
-		if strings.HasPrefix(m.actionStatus, "Error") || strings.Contains(m.actionStatus, "cancelled") {
-			style = changesRequestedStyle
-		}
-		status = style.Render(" " + m.actionStatus)
+		status = " " + banner(m.actionStatus)
 	case v.err != nil && v.detail != nil:
 		status = changesRequestedStyle.Render(" Reload failed: " + v.err.Error())
 	}

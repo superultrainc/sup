@@ -71,6 +71,34 @@ func detectImageMode() {
 	}
 }
 
+// graphemeModeSet records that we switched on mode 2027, to switch it off on exit.
+var graphemeModeSet bool
+
+// enableGraphemeWidths turns on grapheme clustering (mode 2027) where the terminal
+// has it but leaves it off, so flags and joined emoji take the widths layout assumes.
+func enableGraphemeWidths() {
+	in, out := int(os.Stdin.Fd()), int(os.Stdout.Fd())
+	if !term.IsTerminal(in) || !term.IsTerminal(out) {
+		return
+	}
+	old, err := term.MakeRaw(in)
+	if err != nil {
+		return
+	}
+	defer term.Restore(in, old)
+	os.Stdout.WriteString("\x1b[?2027$p\x1b[c")
+	if strings.Contains(readUntilDA1(in, 500*time.Millisecond), "\x1b[?2027;2$y") {
+		os.Stdout.WriteString("\x1b[?2027h")
+		graphemeModeSet = true
+	}
+}
+
+func restoreGraphemeWidths() {
+	if graphemeModeSet {
+		os.Stdout.WriteString("\x1b[?2027l")
+	}
+}
+
 var da1Re = regexp.MustCompile(`\x1b\[\?[0-9;]*c`)
 
 func readUntilDA1(fd int, timeout time.Duration) string {

@@ -2202,10 +2202,12 @@ func main() {
 	go pruneDiskCache()
 	go pruneImageCache()
 	detectImageMode()
+	enableGraphemeWidths()
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	finalModel, err := p.Run()
 	kittyFreeAll()
+	restoreGraphemeWidths()
 	if fm, ok := finalModel.(model); ok && fm.prsDirty {
 		savePRsToCache(fm.prs)
 	}

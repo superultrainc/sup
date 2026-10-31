@@ -66,8 +66,8 @@ func (m model) handleDetailMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case msg.Button == tea.MouseButtonWheelDown:
 		p.scroll += wheelStep
 	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
-		const tabRow = 2
-		if msg.Y == tabRow {
+		top := v.headerHeight()
+		if msg.Y == top-2 { // the tabs row
 			for i, span := range v.tabSpans() {
 				if msg.X >= span[0] && msg.X < span[1] {
 					v.tab = i
@@ -76,9 +76,9 @@ func (m model) handleDetailMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// File tree: jump the diff to the clicked file.
-		if v.tab == tabFiles && v.treeWidth() > 0 && msg.X < v.treeWidth() && msg.Y >= detailHeaderHeight {
+		if v.tab == tabFiles && v.treeWidth() > 0 && msg.X < v.treeWidth() && msg.Y >= top {
 			_, fileAt := fileTree(v.diff, v.currentFile(), v.detail, v.treeWidth(), v.bodyHeight(m.height))
-			row := msg.Y - detailHeaderHeight
+			row := msg.Y - top
 			if row < len(fileAt) && fileAt[row] >= 0 && fileAt[row] < len(v.panes[tabFiles].marks) {
 				v.panes[tabFiles].scroll = v.panes[tabFiles].marks[fileAt[row]]
 			}

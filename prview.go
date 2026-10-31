@@ -407,7 +407,7 @@ func (v *prDetailView) mainWidth(tab int) int {
 func (v *prDetailView) pane() *detailPane { return &v.panes[v.tab] }
 
 func (v *prDetailView) bodyHeight(termHeight int) int {
-	return max(termHeight-detailHeaderHeight-2, 3) // 2 footer rows
+	return max(termHeight-v.headerHeight()-2, 3) // 2 footer rows
 }
 
 func (v *prDetailView) maxScroll(termHeight int) int {

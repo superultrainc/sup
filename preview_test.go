@@ -132,3 +132,25 @@ func TestDemoApprovalSticks(t *testing.T) {
 		t.Fatalf("preview should refetch and show the approval")
 	}
 }
+
+func TestLongTitleWrapsInPreview(t *testing.T) {
+	m := previewModel(t, 120)
+	m.preview.pr.Title = "Unload idle local models after ten minutes and reload them on the next hotkey press"
+	m.preview.detail.Title = m.preview.pr.Title
+	if m.preview.headerHeight() != detailHeaderHeight+1 {
+		t.Fatalf("a long title should take a second header line")
+	}
+	out := ansi.Strip(m.View())
+	if !strings.Contains(out, "Unload idle local models") || !strings.Contains(out, "hotkey press") {
+		t.Fatalf("the whole title should show across the two lines:\n%s", out)
+	}
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != m.height {
+		t.Fatalf("frame should stay %d rows, got %d", m.height, len(lines))
+	}
+	for _, l := range lines {
+		if w := ansi.StringWidth(l); w > m.width {
+			t.Fatalf("line wider than the screen (%d): %q", w, ansi.Strip(l))
+		}
+	}
+}

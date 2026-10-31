@@ -80,9 +80,13 @@ func fetchSearchPage(query, after string) (searchPage, error) {
 	if err != nil {
 		return searchPage{}, fmt.Errorf("failed to fetch PRs: %w", err)
 	}
+	// An error reply carries no search; reading it as "no PRs" would prune the whole list.
+	if err := graphqlErrors(out); err != nil {
+		return searchPage{}, fmt.Errorf("failed to fetch PRs: %w", err)
+	}
 	var resp struct {
 		Data struct {
-			Search struct {
+			Search *struct {
 				IssueCount int `json:"issueCount"`
 				PageInfo   struct {
 					EndCursor   string `json:"endCursor"`
@@ -96,6 +100,9 @@ func fetchSearchPage(query, after string) (searchPage, error) {
 		return searchPage{}, fmt.Errorf("failed to parse PRs: %w", err)
 	}
 	s := resp.Data.Search
+	if s == nil {
+		return searchPage{}, fmt.Errorf("failed to fetch PRs: no search results in reply")
+	}
 	return searchPage{s.Nodes, s.IssueCount, s.PageInfo.EndCursor, s.PageInfo.HasNextPage}, nil
 }
 

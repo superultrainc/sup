@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -112,11 +113,33 @@ func graphqlPOSTOnce(query string) ([]byte, int, error) {
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
-	return data, resp.StatusCode, nil
+	return stripJSONControls(data), resp.StatusCode, nil
 }
 
-// Output file for shell integration (shell wrapper reads this to cd)
-const selectionFile = "/tmp/sup-selection"
+// legacySelectionFile is where wrappers from before SUP_SELECTION_FILE read the folder to cd into.
+const legacySelectionFile = "/tmp/sup-selection"
+
+// selectionPath is the file the shell wrapper reads to cd after a checkout.
+// Current wrappers pass a private temp file per run.
+func selectionPath() string {
+	if p := os.Getenv("SUP_SELECTION_FILE"); p != "" {
+		return p
+	}
+	return legacySelectionFile
+}
+
+// writeSelection refuses to follow a symlink, so a planted link can't redirect the write.
+func writeSelection(dir string) error {
+	f, err := os.OpenFile(selectionPath(), os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(dir)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
 
 // Common locations where repos might be cloned
 var defaultDevDirs = []string{
@@ -184,7 +207,7 @@ func loadCachedPRs() []PR {
 		return nil
 	}
 	var prs []PR
-	if err := json.Unmarshal(data, &prs); err != nil {
+	if err := json.Unmarshal(stripJSONControls(data), &prs); err != nil {
 		return nil
 	}
 	return prs
@@ -325,6 +348,7 @@ type editorDoneMsg struct {
 type reviewSubmittedMsg struct {
 	action string
 	pr     PR
+	body   string // kept so a rejected review's text isn't lost
 	err    error
 }
 
@@ -536,30 +560,29 @@ func findWorktreePath(repoPath, branch string) string {
 }
 
 // findRepoPath searches for a repo in common locations
-func findRepoPath(repoName string) string {
+// findRepoPath finds a local clone of owner/name, checking its origin so a
+// same-named repo from another org isn't picked.
+func findRepoPath(owner, name string) string {
 	home := os.Getenv("HOME")
-
-	// Check SUP_DEV_DIR first if set
+	var candidates []string
 	if devDir := os.Getenv("SUP_DEV_DIR"); devDir != "" {
-		path := filepath.Join(devDir, repoName)
-		if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
-			return path
-		}
+		candidates = append(candidates, filepath.Join(devDir, name))
 	}
-
-	// Search common locations
 	for _, dir := range defaultDevDirs {
-		var path string
-		if dir == "" {
-			path = filepath.Join(home, repoName)
-		} else {
-			path = filepath.Join(home, dir, repoName)
+		candidates = append(candidates, filepath.Join(home, dir, name))
+	}
+	for _, path := range candidates {
+		if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+			continue
 		}
-		if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+		out, err := exec.Command("git", "-C", path, "remote", "get-url", "origin").Output()
+		if err != nil {
+			continue
+		}
+		if slug, err := slugFromRemote(strings.TrimSpace(string(out))); err == nil && strings.EqualFold(slug, owner+"/"+name) {
 			return path
 		}
 	}
-
 	return ""
 }
 
@@ -633,7 +656,7 @@ func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 			review["body"] = body
 		}
 		_, err := githubREST("POST", fmt.Sprintf("%s/pulls/%d/reviews", repoPath(pr), pr.Number), review)
-		return reviewSubmittedMsg{action: action, pr: pr, err: err}
+		return reviewSubmittedMsg{action: action, pr: pr, body: body, err: err}
 	}
 }
 
@@ -915,6 +938,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reviewSubmittedMsg:
 		if msg.err != nil {
 			m.actionStatus = "Error: " + msg.err.Error()
+			if msg.body != "" {
+				path := filepath.Join(cacheDir(), "last-review.md")
+				if os.WriteFile(path, []byte(msg.body), 0600) == nil {
+					m.actionStatus += " · your text is saved in " + path
+				}
+			}
 			return m, nil
 		}
 		// Refresh just this PR so its badge reflects the new review state.
@@ -2327,10 +2356,11 @@ func main() {
 
 	if m.selected != nil {
 		pr := m.selected
-		repoPath := findRepoPath(pr.Repository.Name)
+		slug := pr.Repository.Owner.Login + "/" + pr.Repository.Name
+		repoPath := findRepoPath(pr.Repository.Owner.Login, pr.Repository.Name)
 
 		if repoPath == "" {
-			fmt.Fprintf(os.Stderr, "Repo '%s' not found in common locations.\n", pr.Repository.Name)
+			fmt.Fprintf(os.Stderr, "No clone of %s found in common locations.\n", slug)
 			fmt.Fprintf(os.Stderr, "Clone it: gh repo clone %s/%s\n",
 				pr.Repository.Owner.Login, pr.Repository.Name)
 			fmt.Fprintf(os.Stderr, "Or set SUP_DEV_DIR to your repos directory.\n")
@@ -2343,14 +2373,14 @@ func main() {
 			fmt.Printf("Branch '%s' already checked out at %s\n", pr.HeadRefName, wtPath)
 			targetPath = wtPath
 		} else {
-			// Change to repo directory and run gh pr checkout
 			if err := os.Chdir(repoPath); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: could not cd to %s: %v\n", repoPath, err)
 				os.Exit(1)
 			}
 
 			fmt.Printf("Checking out PR #%d in %s...\n", pr.Number, repoPath)
-			cmd := exec.Command("gh", "pr", "checkout", fmt.Sprintf("%d", pr.Number), "--force")
+			// No --force: it would reset a local branch and drop unpushed commits.
+			cmd := exec.Command("gh", "pr", "checkout", fmt.Sprintf("%d", pr.Number), "--repo", slug)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {
@@ -2359,10 +2389,10 @@ func main() {
 			}
 		}
 
-		// Write path for shell wrapper to cd into
-		os.WriteFile(selectionFile, []byte(targetPath), 0644)
+		if err := writeSelection(targetPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Checked out at %s (couldn't tell the shell to cd there: %v)\n", targetPath, err)
+		}
 	} else {
-		// No selection - clean up any stale selection file
-		os.Remove(selectionFile)
+		os.Remove(selectionPath()) // no stale folder for the wrapper to cd into
 	}
 }

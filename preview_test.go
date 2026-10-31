@@ -154,3 +154,12 @@ func TestLongTitleWrapsInPreview(t *testing.T) {
 		}
 	}
 }
+
+func TestPreviewSurvivesResizeWhileScrolled(t *testing.T) {
+	m := previewModel(t, 100)
+	m.preview.detail.Body = strings.Repeat("word ", 4000)
+	m.preview.applyDetail(m.preview.detail)
+	m.preview.panes[tabConversation].scroll = len(m.preview.panes[tabConversation].lines) - 5
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 250, Height: 30})
+	next.(model).View() // panicked: the scroll ran past the re-wrapped lines
+}

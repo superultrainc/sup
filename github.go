@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -56,6 +57,7 @@ func githubREST(method, path string, body any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	data = stripJSONControls(data)
 	if resp.StatusCode >= 400 {
 		return data, apiError(resp.StatusCode, data)
 	}
@@ -128,4 +130,45 @@ func fetchViewer() (string, []string, error) {
 		orgs = append(orgs, o.Login)
 	}
 	return r.Data.Viewer.Login, orgs, nil
+}
+
+// stripJSONControls drops terminal control characters (ESC, BEL, C1...) from a
+// JSON reply, so nothing GitHub returns can drive the terminal. \n, \r and \t stay.
+func stripJSONControls(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); {
+		switch c := b[i]; {
+		case c == '\\' && i+1 < len(b):
+			if b[i+1] == 'u' && i+6 <= len(b) {
+				if v, err := strconv.ParseUint(string(b[i+2:i+6]), 16, 16); err == nil && isControl(rune(v)) {
+					i += 6
+					continue
+				}
+			}
+			out = append(out, c, b[i+1]) // keeps escaped backslashes intact
+			i += 2
+		case c == 0x7f:
+			i++
+		case c == 0xc2 && i+1 < len(b) && b[i+1] >= 0x80 && b[i+1] <= 0x9f: // raw U+0080-U+009F
+			i += 2
+		default:
+			out = append(out, c)
+			i++
+		}
+	}
+	return out
+}
+
+func isControl(r rune) bool {
+	return (r < 0x20 && r != '\n' && r != '\r' && r != '\t') || (r >= 0x7f && r <= 0x9f)
+}
+
+// stripControls drops terminal control characters from plain text such as a patch.
+func stripControls(s string) string {
+	return strings.Map(func(r rune) rune {
+		if isControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }

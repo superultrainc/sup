@@ -32,12 +32,14 @@ go install github.com/superultrainc/sup@latest
 If using `go install`, add this to your `~/.zshrc` or `~/.bashrc` for auto-cd after checkout:
 ```bash
 sup() {
-  rm -f /tmp/sup-selection
-  command sup "$@"
-  if [[ -f /tmp/sup-selection ]]; then
-    cd "$(cat /tmp/sup-selection)"
-    rm -f /tmp/sup-selection
-  fi
+  local sel dir rc
+  sel=$(mktemp) || return
+  SUP_SELECTION_FILE="$sel" command sup "$@"
+  rc=$?
+  dir=$(cat "$sel" 2>/dev/null)
+  rm -f "$sel"
+  [[ -n "$dir" ]] && cd "$dir"
+  return $rc
 }
 ```
 

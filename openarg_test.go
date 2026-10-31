@@ -55,7 +55,7 @@ func TestCompletions(t *testing.T) {
 }
 
 func TestSlugFromRemote(t *testing.T) {
-	for _, url := range []string{"git@github.com:acme/web.git", "https://github.com/acme/web.git", "https://github.com/acme/web"} {
+	for _, url := range []string{"git@github.com:acme/web.git", "https://github.com/acme/web.git", "https://github.com/acme/web", "git@github.com-work:acme/web.git", "ssh://git@github.com/acme/web.git"} {
 		if got, err := slugFromRemote(url); err != nil || got != "acme/web" {
 			t.Errorf("%s: got %q, %v", url, got, err)
 		}

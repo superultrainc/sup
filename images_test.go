@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/png"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,7 +75,8 @@ func TestLoadImageDownscales(t *testing.T) {
 	path := imageCachePath(j.key)
 	os.MkdirAll(filepath.Dir(path), 0755)
 	os.WriteFile(path, buf.Bytes(), 0644)
-	img, b64, err := loadImage(j)
+	e := loadImage(j)
+	img, b64, err := e.img, e.kittyB64, e.err
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,5 +117,40 @@ func TestRawFileURL(t *testing.T) {
 		if got := rawFileURL(u).String(); got != want {
 			t.Errorf("%s: got %s, want %s", in, got, want)
 		}
+	}
+}
+
+func TestAnimatedGIFLoops(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	imagesKitty = true
+	defer func() { imagesKitty = false; kittyPending = nil }()
+	pal := color.Palette{color.Black, color.White}
+	g := &gif.GIF{Config: image.Config{Width: 20, Height: 20, ColorModel: pal}}
+	for i := 0; i < 3; i++ {
+		// Later frames cover only part of the canvas, as optimized GIFs do.
+		f := image.NewPaletted(image.Rect(0, 0, 20-i*5, 20-i*5), pal)
+		for p := range f.Pix {
+			f.Pix[p] = uint8(i % 2)
+		}
+		g.Image = append(g.Image, f)
+		g.Delay = append(g.Delay, 10)
+		g.Disposal = append(g.Disposal, gif.DisposalNone)
+	}
+	var buf bytes.Buffer
+	if err := gif.EncodeAll(&buf, g); err != nil {
+		t.Fatal(err)
+	}
+	j := imageJob{key: "anim", url: "x"}
+	path := imageCachePath(j.key)
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, buf.Bytes(), 0644)
+	e := loadImage(j)
+	if e.err != nil || len(e.frames) != 2 || e.delay != 100 {
+		t.Fatalf("want 2 more frames at 100ms, got %d, %d, %v", len(e.frames), e.delay, e.err)
+	}
+	kittyImageLines("anim", &e, 60, 40)
+	out := strings.Join(kittyPending, "")
+	if e.frames[1].b64 == "" || e.frames[1].x != 0 || !strings.Contains(out, "c=2") || !strings.Contains(out, "s=3") {
+		t.Fatal("frames not sent or not looped")
 	}
 }

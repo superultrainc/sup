@@ -6,7 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"image"
-	_ "image/gif"
+	"image/draw"
+	"image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
@@ -80,7 +81,9 @@ func htmlImageSrcs(html string) []string {
 
 type imageEntry struct {
 	img      image.Image
-	kittyB64 string // base64 PNG for kitty, built off the UI goroutine
+	kittyB64 string     // base64 PNG for kitty, built off the UI goroutine
+	frames   []gifFrame // animated GIF frames after the first, kitty only
+	delay    int        // first frame's delay in ms
 	err      error
 	loading  bool
 }
@@ -147,9 +150,9 @@ func queueImages(d *prDetail, retryFailed bool) tea.Cmd {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				img, b64, err := loadImage(j)
+				e := loadImage(j)
 				mu.Lock()
-				results[j.key] = imageEntry{img: img, kittyB64: b64, err: err}
+				results[j.key] = e
 				mu.Unlock()
 			}(j)
 		}
@@ -178,34 +181,109 @@ func finishImage(img image.Image) (image.Image, string) {
 	return img, kittyEncode(img)
 }
 
-func loadImage(j imageJob) (image.Image, string, error) {
+func loadImage(j imageJob) imageEntry {
 	if name, ok := strings.CutPrefix(j.url, "demo:"); ok {
 		if img := demoImage(name); img != nil {
 			img, b64 := finishImage(img)
-			return img, b64, nil
+			return imageEntry{img: img, kittyB64: b64}
 		}
-		return nil, "", fmt.Errorf("no demo image %q", name)
+		return imageEntry{err: fmt.Errorf("no demo image %q", name)}
 	}
 	path := imageCachePath(j.key)
-	if f, err := os.Open(path); err == nil {
-		defer f.Close()
-		if img, _, err := image.Decode(f); err == nil {
-			img, b64 := finishImage(img)
-			return img, b64, nil
+	data, err := os.ReadFile(path)
+	cached := err == nil
+	if !cached {
+		if data, err = downloadImage(j.url); err != nil {
+			return imageEntry{err: err}
 		}
-	}
-	data, err := downloadImage(j.url)
-	if err != nil {
-		return nil, "", err
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, "", fmt.Errorf("unsupported image")
+		return imageEntry{err: fmt.Errorf("unsupported image")}
 	}
-	os.MkdirAll(filepath.Dir(path), 0755)
-	os.WriteFile(path, data, 0644)
+	if !cached {
+		os.MkdirAll(filepath.Dir(path), 0755)
+		os.WriteFile(path, data, 0644)
+	}
 	img, b64 := finishImage(img)
-	return img, b64, nil
+	e := imageEntry{img: img, kittyB64: b64}
+	if imagesKitty {
+		if g, err := gif.DecodeAll(bytes.NewReader(data)); err == nil && len(g.Image) > 1 {
+			e.frames, e.delay = gifFrames(g)
+		}
+	}
+	return e
+}
+
+type gifFrame struct {
+	b64   string // PNG of only the region that changed
+	x, y  int
+	delay int // ms
+}
+
+const (
+	maxGIFFrames = 300
+	minGIFFrame  = 100 // ms; faster frames are dropped to keep the payload small
+)
+
+// gifFrames composites each frame onto the canvas, since GIF frames are often
+// partial, and returns the frames after the first as changed regions, with
+// the first frame's delay. Frames that change nothing extend the previous one.
+func gifFrames(g *gif.GIF) ([]gifFrame, int) {
+	bounds := image.Rect(0, 0, g.Config.Width, g.Config.Height)
+	// shortcut: big GIFs stay still, since finishImage scales the first frame; scale frames too if one shows up.
+	if bounds.Dx() > maxImageDim || bounds.Dy() > maxImageDim {
+		return nil, 0
+	}
+	canvas, shown := image.NewRGBA(bounds), image.NewRGBA(bounds)
+	delayMS := func(i int) int { return max(g.Delay[i]*10, 20) }
+	first := delayMS(0)
+	var out []gifFrame
+	for i, f := range g.Image[:min(len(g.Image), maxGIFFrames)] {
+		var prev *image.RGBA
+		if g.Disposal[i] == gif.DisposalPrevious {
+			prev = image.NewRGBA(bounds)
+			copy(prev.Pix, canvas.Pix)
+		}
+		draw.Draw(canvas, f.Bounds(), f, f.Bounds().Min, draw.Over)
+		last := &first
+		if len(out) > 0 {
+			last = &out[len(out)-1].delay
+		}
+		if i > 0 {
+			if r := changedRect(shown, canvas); r.Empty() || *last < minGIFFrame {
+				*last += delayMS(i)
+			} else {
+				out = append(out, gifFrame{kittyEncode(canvas.SubImage(r)), r.Min.X, r.Min.Y, delayMS(i)})
+				copy(shown.Pix, canvas.Pix)
+			}
+		} else {
+			copy(shown.Pix, canvas.Pix)
+		}
+		switch g.Disposal[i] {
+		case gif.DisposalBackground:
+			draw.Draw(canvas, f.Bounds(), image.Transparent, image.Point{}, draw.Src)
+		case gif.DisposalPrevious:
+			canvas = prev
+		}
+	}
+	return out, first
+}
+
+// changedRect is the smallest rectangle holding every pixel that differs.
+func changedRect(a, b *image.RGBA) image.Rectangle {
+	var r image.Rectangle
+	w := a.Rect.Dx()
+	for y := 0; y < a.Rect.Dy(); y++ {
+		row := y * a.Stride
+		for x := 0; x < w; x++ {
+			i := row + x*4
+			if a.Pix[i] != b.Pix[i] || a.Pix[i+1] != b.Pix[i+1] || a.Pix[i+2] != b.Pix[i+2] || a.Pix[i+3] != b.Pix[i+3] {
+				r = r.Union(image.Rect(x, y, x+1, y+1))
+			}
+		}
+	}
+	return r
 }
 
 // pruneImageCache drops cached images nobody has needed in a while.
@@ -285,7 +363,7 @@ func imageLines(ref imageRef, width int) []string {
 		return []string{muted.Render("▣ " + truncate(label, width-24) + " · image unavailable")}
 	}
 	if imagesKitty {
-		return kittyImageLines(ref.url, e.img, e.kittyB64, width, imageMaxRow)
+		return kittyImageLines(ref.url, e, width, imageMaxRow)
 	}
 	key := fmt.Sprintf("%s\x00%d", ref.url, width)
 	if lines, ok := imageRenders[key]; ok {

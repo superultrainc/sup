@@ -58,12 +58,14 @@ esac
 SHELL_WRAPPER='
 # sup - GitHub PR picker
 sup() {
-  rm -f /tmp/sup-selection
-  command sup "$@"
-  if [[ -f /tmp/sup-selection ]]; then
-    cd "$(cat /tmp/sup-selection)"
-    rm -f /tmp/sup-selection
-  fi
+  local sel dir rc
+  sel=$(mktemp) || return
+  SUP_SELECTION_FILE="$sel" command sup "$@"
+  rc=$?
+  dir=$(cat "$sel" 2>/dev/null)
+  rm -f "$sel"
+  [[ -n "$dir" ]] && cd "$dir"
+  return $rc
 }'
 
 # Clean up old gpr function if present (renamed to sup)
@@ -71,6 +73,13 @@ if grep -q "gpr()" "$SHELL_RC" 2>/dev/null; then
     sed -i.bak '/# gpr - GitHub PR picker/,/^}/d' "$SHELL_RC"
     rm -f "$SHELL_RC.bak"
     echo "Removed old gpr() function from $SHELL_RC"
+fi
+
+# Replace a wrapper this script added before, which used a shared /tmp file
+if grep -q "# sup - GitHub PR picker" "$SHELL_RC" 2>/dev/null && grep -q "/tmp/sup-selection" "$SHELL_RC"; then
+    sed -i.bak '/# sup - GitHub PR picker/,/^}/d' "$SHELL_RC"
+    rm -f "$SHELL_RC.bak"
+    echo "Removed the old sup() wrapper from $SHELL_RC"
 fi
 
 # Add shell wrapper if not already present

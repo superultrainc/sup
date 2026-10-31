@@ -64,3 +64,27 @@ func TestFindRepoPathChecksOrigin(t *testing.T) {
 		t.Fatalf("no clone of nobody/api exists, got %q", got)
 	}
 }
+
+func TestSelectionFileIgnoresSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "zshrc")
+	os.WriteFile(victim, []byte("keep me"), 0600)
+	link := filepath.Join(dir, "selection")
+	os.Symlink(victim, link)
+	t.Setenv("SUP_SELECTION_FILE", link)
+	if err := writeSelection("/somewhere"); err == nil {
+		t.Fatalf("writing through a symlink should fail")
+	}
+	if data, _ := os.ReadFile(victim); string(data) != "keep me" {
+		t.Fatalf("symlink target was overwritten: %q", data)
+	}
+
+	sel := filepath.Join(dir, "real")
+	t.Setenv("SUP_SELECTION_FILE", sel)
+	if err := writeSelection("/repo/path"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(sel); string(data) != "/repo/path" {
+		t.Fatalf("got %q", data)
+	}
+}

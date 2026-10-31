@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -115,8 +116,30 @@ func graphqlPOSTOnce(query string) ([]byte, int, error) {
 	return stripJSONControls(data), resp.StatusCode, nil
 }
 
-// Output file for shell integration (shell wrapper reads this to cd)
-const selectionFile = "/tmp/sup-selection"
+// legacySelectionFile is where wrappers from before SUP_SELECTION_FILE read the folder to cd into.
+const legacySelectionFile = "/tmp/sup-selection"
+
+// selectionPath is the file the shell wrapper reads to cd after a checkout.
+// Current wrappers pass a private temp file per run.
+func selectionPath() string {
+	if p := os.Getenv("SUP_SELECTION_FILE"); p != "" {
+		return p
+	}
+	return legacySelectionFile
+}
+
+// writeSelection refuses to follow a symlink, so a planted link can't redirect the write.
+func writeSelection(dir string) error {
+	f, err := os.OpenFile(selectionPath(), os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(dir)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
 
 // Common locations where repos might be cloned
 var defaultDevDirs = []string{
@@ -2366,10 +2389,10 @@ func main() {
 			}
 		}
 
-		// Write path for shell wrapper to cd into
-		os.WriteFile(selectionFile, []byte(targetPath), 0644)
+		if err := writeSelection(targetPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Checked out at %s (couldn't tell the shell to cd there: %v)\n", targetPath, err)
+		}
 	} else {
-		// No selection - clean up any stale selection file
-		os.Remove(selectionFile)
+		os.Remove(selectionPath()) // no stale folder for the wrapper to cd into
 	}
 }

@@ -366,6 +366,7 @@ type prDetailView struct {
 	picker      *reviewerPicker // non-nil while the reviewer picker is open
 	search      *detailSearch   // non-nil while a `/` search is being typed or is active
 	dirty       [tabCount]bool  // panes needing a render before they're shown
+	kittyGen    int             // kittyEvictions when panes last rendered images
 }
 
 func newDetailView(pr PR) *prDetailView {

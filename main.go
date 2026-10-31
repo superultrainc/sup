@@ -799,8 +799,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		handleKittyFlushed(f)
 		return m, scheduleKittyFlush()
 	}
+	kittyTick++
 	next, cmd := m.update(msg)
 	nm := next.(model)
+	// Re-render views whose image placeholders may point at freed images.
+	for _, v := range []*prDetailView{nm.detail, nm.preview} {
+		if v != nil && v.kittyGen != kittyEvictions {
+			v.kittyGen = kittyEvictions
+			v.invalidate(tabConversation, tabFiles, tabCommits, tabChecks)
+		}
+	}
 	if nm.detail != nil {
 		// Panes render lazily, only once their tab is showing.
 		nm.detail.ensure()

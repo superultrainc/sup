@@ -503,6 +503,13 @@ func mockPRs() []PR {
 	]`
 	var prs []PR
 	json.Unmarshal([]byte(mockJSON), &prs)
+	for i := range prs {
+		prs[i].HeadRefOid = fmt.Sprintf("%07x", prs[i].Number*7919)
+		prs[i].UpdatedAt = demoNow.Add(-time.Duration(i*13) * time.Minute)
+	}
+	for i, d := range demoPRs {
+		prs = append(prs, d.toPR(len(prs)+i))
+	}
 	return prs
 }
 
@@ -615,6 +622,10 @@ var reviewEvents = map[string]string{"approve": "APPROVE", "request-changes": "R
 
 func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 	return func() tea.Msg {
+		if demoMode {
+			demoActions.Store(prKey(pr), action)
+			return reviewSubmittedMsg{action: action, pr: pr}
+		}
 		review := map[string]string{"event": reviewEvents[action]}
 		if body != "" {
 			review["body"] = body
@@ -684,7 +695,7 @@ func demoRows(prs []PR) []PR {
 	for _, want := range prs {
 		for _, mock := range mockPRs() {
 			if samePR(mock, want) {
-				out = append(out, mock)
+				out = append(out, applyDemoAction(mock))
 			}
 		}
 	}
@@ -900,7 +911,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh just this PR so its badge reflects the new review state.
 		cmds := []tea.Cmd{fetchSinglePRCmd(msg.pr)}
-		if m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr) {
+		if (m.detail != nil && prKey(m.detail.pr) == prKey(msg.pr)) || (m.preview != nil && prKey(m.preview.pr) == prKey(msg.pr)) {
 			cmds = append(cmds, fetchPRDetailCmd(msg.pr))
 		}
 		return m, tea.Batch(cmds...)
@@ -2231,7 +2242,7 @@ func main() {
 
 	// In demo mode, skip org detection
 	if demoMode {
-		orgs = []string{"acme-corp"}
+		orgs, currentUser = []string{"acme-corp"}, "sarah"
 	} else if mineMode {
 		if meta, ok := loadCachedMeta(); ok && meta.CurrentUser != "" {
 			currentUser = meta.CurrentUser

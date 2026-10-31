@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -126,5 +127,24 @@ func TestConfirmModalKeys(t *testing.T) {
 	m = press(t, m, "A", "enter")
 	if m.confirmPR != nil || !strings.HasPrefix(m.actionStatus, "✓ Approved") {
 		t.Fatalf("enter should confirm, got status %q", m.actionStatus)
+	}
+}
+
+func TestDemoActionsStick(t *testing.T) {
+	demoMode = true
+	t.Cleanup(func() { demoMode = false; demoActions = sync.Map{} })
+	prs := mockPRs()
+	merged, drafted := prs[0], prs[1]
+	runMergeCmd(merged, nil, mergeDialog{}, mergeMethod{})()
+	runDraftCmd(drafted, true)()
+
+	msg := discoverCmd("", 1)().(discoveredMsg)
+	for _, s := range msg.stubs {
+		if prKey(s.asPR()) == prKey(merged) {
+			t.Fatalf("a merged demo PR should stay gone after a refresh")
+		}
+	}
+	if rows := demoRows([]PR{drafted}); len(rows) != 1 || !rows[0].IsDraft {
+		t.Fatalf("a demo PR converted to draft should stay a draft")
 	}
 }

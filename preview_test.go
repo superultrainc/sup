@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -63,5 +64,71 @@ func TestPreviewLoadsImages(t *testing.T) {
 	}
 	if e := imageStore["https://example.com/preview-test.png"]; e == nil || !e.loading {
 		t.Fatalf("image should be queued, got %+v", e)
+	}
+}
+
+func TestDemoNeverLoads(t *testing.T) {
+	demoMode = true
+	t.Cleanup(func() { demoMode = false })
+	m := initialModel()
+	m.width, m.height = 150, 30
+	m.handleRowsRefreshed(prsRefreshedMsg{prs: mockPRs()})
+	m.loading, m.visibleCount = false, len(m.filtered)
+	m = press(t, m, " ")
+	for i := range m.filtered {
+		if out := ansi.Strip(m.View()); strings.Contains(out, "Loading") {
+			t.Fatalf("demo PR #%d shows a loading state", m.filtered[i].Number)
+		}
+		m = press(t, m, "j")
+	}
+	if len(m.filtered) < 40 {
+		t.Fatalf("demo should have plenty of PRs, got %d", len(m.filtered))
+	}
+}
+
+func TestDemoApprovalSticks(t *testing.T) {
+	demoMode, currentUser = true, "sarah"
+	t.Cleanup(func() { demoMode, currentUser = false, ""; demoActions = sync.Map{} })
+	m := initialModel()
+	m.width, m.height = 150, 30
+	m.handleRowsRefreshed(prsRefreshedMsg{prs: mockPRs()})
+	m.loading, m.visibleCount = false, len(m.filtered)
+	for statusLabelForFilter(m.filtered[m.cursor]) != "review" {
+		m.cursor++
+	}
+	key := prKey(m.filtered[m.cursor])
+	m = press(t, press(t, m, " "), "A")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(model)
+	if !strings.Contains(ansi.Strip(m.View()), "✓ Approved PR") {
+		t.Fatalf("approving should show a confirmation banner")
+	}
+	// Run the submit, then the refetches it triggers.
+	pending := []tea.Cmd{cmd}
+	for len(pending) > 0 {
+		c := pending[0]
+		pending = pending[1:]
+		if c == nil {
+			continue
+		}
+		switch msg := c().(type) {
+		case tea.BatchMsg:
+			pending = append(pending, msg...)
+		case nil:
+		default:
+			next, more := m.Update(msg)
+			m = next.(model)
+			if _, isTick := msg.(kittyFlushedMsg); !isTick {
+				pending = append(pending, more)
+			}
+		}
+	}
+	for _, pr := range m.prs {
+		if prKey(pr) == key && statusLabelForFilter(pr) != "approved" {
+			t.Fatalf("approved PR should show as approved, got %s", statusLabelForFilter(pr))
+		}
+	}
+	if m.preview == nil || m.preview.detail.ReviewDecision != "APPROVED" {
+		t.Fatalf("preview should refetch and show the approval")
 	}
 }

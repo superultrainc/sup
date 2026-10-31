@@ -285,6 +285,9 @@ type model struct {
 	actionStatus      string            // transient success/error feedback for review actions
 	helpMode          bool              // true while the help overlay is showing
 	palette           *commandPalette   // non-nil while the command palette is open
+	previewOn         bool              // split the list with a preview of the cursor's PR
+	preview           *prDetailView     // the preview pane's view, kept separate from detail
+	compactList       bool              // render the narrow list used beside the preview
 	visibleCount      int               // for animation
 	spinnerFrame      int               // for loading spinner
 	refreshID         int               // increments each refresh; stale results are dropped
@@ -735,13 +738,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scheduleKittyFlush()
 	}
 	next, cmd := m.update(msg)
-	if nm := next.(model); nm.detail != nil {
+	nm := next.(model)
+	if nm.detail != nil {
 		// Panes render lazily, only once their tab is showing.
 		nm.detail.ensure()
 		nm.detail.clampScroll(nm.height)
 	}
+	nm.syncPreview()
 	// Any rebuild may have queued image transmissions for the next frame.
-	return next, tea.Batch(cmd, scheduleKittyFlush())
+	return nm, tea.Batch(cmd, scheduleKittyFlush())
 }
 
 func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -772,6 +777,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.detail != nil {
 			m.detail.rebuildForImages()
 			m.detail.clampScroll(m.height)
+		}
+		if m.preview != nil && m.preview.detail != nil {
+			m.preview.rebuildForImages()
 		}
 		return m, nil
 
@@ -1329,6 +1337,21 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.helpMode = true
 		return m, nil
 
+	case " ":
+		m.previewOn = !m.previewOn
+		return m, m.schedulePrefetch()
+
+	case "ctrl+d", "ctrl+u":
+		if v := m.preview; v != nil && m.previewActive() {
+			step := v.bodyHeight(m.height) / 2
+			if msg.String() == "ctrl+u" {
+				step = -step
+			}
+			v.panes[tabConversation].scroll += step
+			v.clampScroll(m.height)
+		}
+		return m, nil
+
 	case "enter":
 		if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
 			m.selected = &m.filtered[m.cursor]
@@ -1601,6 +1624,8 @@ func (m model) helpSections() []helpSection {
 			{"j / ↓", "Move down"},
 			{"k / ↑", "Move up"},
 			{"g / G", "Top / bottom"},
+			{"space", "Toggle preview pane"},
+			{"ctrl+d / u", "Scroll preview"},
 		}},
 		{"Filter", [][2]string{
 			{"/", "Open filter"},
@@ -1782,6 +1807,9 @@ func (m model) view() string {
 	if m.detail != nil {
 		return m.detailView()
 	}
+	if m.previewActive() {
+		return m.splitView()
+	}
 	var s strings.Builder
 	lp := newListPainters()
 
@@ -1809,7 +1837,7 @@ func (m model) view() string {
 
 	s.WriteString("\n")
 	separatorWidth := m.width - 2 // account for "  " prefix
-	if separatorWidth < 60 {
+	if separatorWidth < 60 && !m.compactList {
 		separatorWidth = 60
 	}
 	rowWidth := separatorWidth
@@ -1838,7 +1866,11 @@ func (m model) view() string {
 	s.WriteString("\n")
 
 	// Always show header
-	s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
+	if m.compactList {
+		s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("#", colNum) + "TITLE"))
+	} else {
+		s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
+	}
 	s.WriteString("\n")
 	s.WriteString(lp.dim.Render("  " + strings.Repeat("─", separatorWidth)))
 	s.WriteString("\n")
@@ -1881,6 +1913,10 @@ func (m model) view() string {
 		for i := start; i < end; i++ {
 			pr := m.filtered[i]
 			isSelected := m.cursor == i
+			if m.compactList {
+				s.WriteString(compactRow(pr, isSelected, rowWidth+2, lp) + "\n")
+				continue
+			}
 
 			cursor := "  "
 			if isSelected {
@@ -1960,7 +1996,11 @@ func (m model) view() string {
 	}
 
 	s.WriteString("\n")
-	s.WriteString(lp.help.Render(truncateToWidth("  ctrl+k: commands · /: filter · enter: checkout · ?: help", rowWidth)))
+	hints := "  ctrl+k: commands · /: filter · space: preview · enter: checkout · ?: help"
+	if m.compactList {
+		hints = "  space: close · ctrl+d/u: scroll · v: open"
+	}
+	s.WriteString(lp.help.Render(truncateToWidth(hints, rowWidth)))
 	s.WriteString("\n")
 
 	return s.String()

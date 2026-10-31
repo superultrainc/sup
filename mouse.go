@@ -29,6 +29,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.filterMode || m.confirmAction != "" {
 		return m, nil
 	}
+	if m.previewActive() && msg.X > m.previewListWidth() {
+		return m.handlePreviewMouse(msg)
+	}
 	switch {
 	case msg.Button == tea.MouseButtonWheelUp:
 		m.cursor = max(m.cursor-1, 0)

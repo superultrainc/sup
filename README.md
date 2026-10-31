@@ -79,6 +79,7 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `k` / `↑` | Move up |
 | `g` | Go to top |
 | `G` | Go to bottom |
+| `space` | Preview pane: the list narrows to the left and the selected PR's Conversation tab shows on the right. `ctrl+d` / `ctrl+u` or the mouse wheel scroll it, clicking it opens the full PR view. Needs a terminal at least 100 columns wide |
 | `/` | Filter PRs (prefix `#` repo, `@` reviewer, `!` author) |
 | `s` | Cycle status filter |
 | `p` / `P` | Cycle repo filter (forward / back) |

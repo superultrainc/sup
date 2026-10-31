@@ -132,7 +132,8 @@ func kittyFreeAll() {
 
 // kittyImageLines lays out img in at most maxCols x maxRows cells and returns
 // the placeholder rows, queueing the transmission the first time.
-func kittyImageLines(key string, img image.Image, b64 string, maxCols, maxRows int) []string {
+func kittyImageLines(key string, e *imageEntry, maxCols, maxRows int) []string {
+	img, b64 := e.img, e.kittyB64
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 	if w == 0 || h == 0 {
@@ -155,6 +156,9 @@ func kittyImageLines(key string, img image.Image, b64 string, maxCols, maxRows i
 			b64 = kittyEncode(resample(img, tw, th))
 		}
 		kittyPending = append(kittyPending, kittyTransmit(id, b64, cols, rows))
+		if len(e.frames) > 0 && b64 == e.kittyB64 {
+			kittyPending = append(kittyPending, kittyAnimation(id, e))
+		}
 	}
 
 	color := fmt.Sprintf("\x1b[38;2;%d;%d;%dm", id>>16&0xff, id>>8&0xff, id&0xff)
@@ -186,6 +190,23 @@ func kittyEncode(img image.Image) string {
 // kittyTransmit wraps a base64 PNG in chunked APC commands that create a
 // virtual placement (U=1) of cols x rows.
 func kittyTransmit(id int, data string, cols, rows int) string {
+	return kittyChunks(fmt.Sprintf("a=T,U=1,f=100,t=d,i=%d,c=%d,r=%d,q=2", id, cols, rows), data)
+}
+
+// kittyAnimation adds a GIF's later frames to image id and loops them in the terminal.
+func kittyAnimation(id int, e *imageEntry) string {
+	var sb strings.Builder
+	for i, f := range e.frames {
+		// Frame i+2 draws its changed region over frame i+1 (c=).
+		sb.WriteString(kittyChunks(fmt.Sprintf("a=f,f=100,t=d,i=%d,x=%d,y=%d,c=%d,z=%d,q=2", id, f.x, f.y, i+1, f.delay), f.b64))
+	}
+	fmt.Fprintf(&sb, "\x1b_Ga=a,i=%d,r=1,z=%d,q=2\x1b\\", id, e.delay)
+	fmt.Fprintf(&sb, "\x1b_Ga=a,i=%d,s=3,v=1,q=2\x1b\\", id)
+	return sb.String()
+}
+
+// kittyChunks sends base64 data under the given keys, split as the protocol requires.
+func kittyChunks(keys, data string) string {
 	if data == "" {
 		return ""
 	}
@@ -198,7 +219,7 @@ func kittyTransmit(id int, data string, cols, rows int) string {
 		}
 		part := data[i:min(i+chunk, len(data))]
 		if i == 0 {
-			fmt.Fprintf(&sb, "\x1b_Ga=T,U=1,f=100,t=d,i=%d,c=%d,r=%d,q=2,m=%d;%s\x1b\\", id, cols, rows, more, part)
+			fmt.Fprintf(&sb, "\x1b_G%s,m=%d;%s\x1b\\", keys, more, part)
 		} else {
 			fmt.Fprintf(&sb, "\x1b_Gm=%d;%s\x1b\\", more, part)
 		}

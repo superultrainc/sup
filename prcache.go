@@ -326,7 +326,7 @@ func readDiskCache(pr PR, parse bool) (diskCacheLoadedMsg, bool) {
 		return diskCacheLoadedMsg{}, false
 	}
 	var de diskCacheEntry
-	if json.Unmarshal(data, &de) != nil {
+	if json.Unmarshal(stripJSONControls(data), &de) != nil {
 		return diskCacheLoadedMsg{}, false
 	}
 	msg := diskCacheLoadedMsg{key: key, raw: de.Detail, fp: detailFingerprint(de.Detail), detailAt: de.DetailAt, patch: de.Patch, head: de.Head}

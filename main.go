@@ -112,7 +112,7 @@ func graphqlPOSTOnce(query string) ([]byte, int, error) {
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
-	return data, resp.StatusCode, nil
+	return stripJSONControls(data), resp.StatusCode, nil
 }
 
 // Output file for shell integration (shell wrapper reads this to cd)
@@ -184,7 +184,7 @@ func loadCachedPRs() []PR {
 		return nil
 	}
 	var prs []PR
-	if err := json.Unmarshal(data, &prs); err != nil {
+	if err := json.Unmarshal(stripJSONControls(data), &prs); err != nil {
 		return nil
 	}
 	return prs

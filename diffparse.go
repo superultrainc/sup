@@ -78,6 +78,7 @@ func expandTabs(s string) string {
 // parseUnifiedDiff parses `git diff` output. File-header lines are only
 // recognised before a file's first hunk so `--- x` deletions aren't misread.
 func parseUnifiedDiff(patch string) []*diffFile {
+	patch = stripControls(patch) // file contents are untrusted; keep them from driving the terminal
 	var files []*diffFile
 	var f *diffFile
 	var h *diffHunk

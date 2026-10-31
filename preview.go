@@ -39,6 +39,7 @@ func (m *model) syncPreview() {
 	}
 	v.width = w
 	v.loading = v.detail == nil
+	v.clampScroll(m.height) // a rebuild at a new width can leave fewer lines
 }
 
 func (m model) splitView() string {

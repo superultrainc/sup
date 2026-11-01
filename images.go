@@ -416,6 +416,9 @@ func imageLines(ref imageRef, width int) []string {
 	label := ref.alt
 	if label == "" {
 		label = filepath.Base(ref.url)
+		if u, err := url.Parse(ref.url); err == nil {
+			label = filepath.Base(u.Path)
+		}
 	}
 	e := imageStore[ref.url]
 	switch {
@@ -493,16 +496,37 @@ func halfBlocks(img image.Image, maxCols, maxRows int, th diffTheme) []string {
 	return out
 }
 
-// richBody is markdownLines with images rendered inline between text runs.
+// richBody is markdownLines with images rendered inline between text runs,
+// and tables of images laid out side by side as GitHub shows them.
 func richBody(body string, width int) []string {
 	body = cleanBody(body)
-	refs := findImages(body)
-	if len(refs) == 0 {
+	if len(findImages(body)) == 0 {
 		return markdownLines(body, width)
 	}
 	var out []string
+	for _, c := range splitImageTables(body) {
+		lines := inlineImages(c.text, width)
+		if c.table != nil {
+			lines = imageTableLines(c.table, width)
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, lines...)
+	}
+	return out
+}
+
+// inlineImages renders markdown with each image on its own lines.
+func inlineImages(body string, width int) []string {
+	var out []string
 	pos := 0
-	for _, r := range refs {
+	refs := findImages(body)
+	for i := 0; i < len(refs); i++ {
+		r := refs[i]
 		if r.start < pos {
 			continue
 		}
@@ -510,9 +534,16 @@ func richBody(body string, width int) []string {
 			out = append(out, text...)
 			out = append(out, "")
 		}
-		out = append(out, imageLines(r, width)...)
+		// Images separated only by spaces or a single newline sit side by side, as on GitHub.
+		row := []imageRef{r}
+		for i+1 < len(refs) && strings.TrimSpace(body[row[len(row)-1].end:refs[i+1].start]) == "" &&
+			!strings.Contains(body[row[len(row)-1].end:refs[i+1].start], "\n\n") {
+			i++
+			row = append(row, refs[i])
+		}
+		out = append(out, imageRow(row, width)...)
 		out = append(out, "")
-		pos = r.end
+		pos = row[len(row)-1].end
 	}
 	out = append(out, markdownLines(body[pos:], width)...)
 	for len(out) > 0 && out[len(out)-1] == "" {

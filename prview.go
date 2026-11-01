@@ -676,6 +676,8 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(append(m.fetchMissing(v.pr, e), spinnerTick())...)
 	case "d":
 		v.tab = tabFiles
+	case "i":
+		return m.openGallery()
 	case "A", "D", "M", "o", "c", "W", "X":
 		return m.handleNormalInput(msg)
 	}

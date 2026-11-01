@@ -307,6 +307,7 @@ type model struct {
 	actionPending     bool              // true while a review submission is in flight
 	actionStatus      string            // transient success/error feedback for review actions
 	helpMode          bool              // true while the help overlay is showing
+	gallery           *imageGallery     // non-nil while the image viewer is open
 	palette           *commandPalette   // non-nil while the command palette is open
 	merge             *mergeDialog      // non-nil while the merge modal is open
 	merging           map[string]int    // prKey -> number of merges in flight
@@ -815,6 +816,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		nm.detail.clampScroll(nm.height)
 	}
 	nm.syncPreview()
+	if nm.gallery != nil {
+		if nm.detail == nil {
+			nm.gallery = nil
+		} else {
+			nm.gallery.layout(nm.width, nm.height)
+		}
+	}
 	// Any rebuild may have queued image transmissions for the next frame.
 	return nm, tea.Batch(cmd, scheduleKittyFlush())
 }
@@ -1035,6 +1043,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.helpMode = false
 			}
 			return m, nil
+		}
+		if m.gallery != nil {
+			return m.handleGalleryInput(msg)
 		}
 		if m.detail != nil {
 			return m.handleDetailInput(msg)
@@ -1774,6 +1785,7 @@ func (m model) helpSections() []helpSection {
 				{"x", "Collapse / expand file"},
 			}},
 			{"Actions", [][2]string{
+				{"i", "View images full size"},
 				{"m", "Merge PR"},
 				{"r", "Edit reviewers"},
 				{"A", "Approve"},
@@ -1908,6 +1920,9 @@ func (m model) view() string {
 	if m.helpMode {
 		m.helpMode = false // m is a copy; render the screen underneath
 		return overlayCenter(m.view(), m.helpView(), m.width, m.height)
+	}
+	if m.gallery != nil {
+		return m.galleryView()
 	}
 	if m.detail != nil {
 		return m.detailView()

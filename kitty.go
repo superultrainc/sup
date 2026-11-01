@@ -153,7 +153,7 @@ func kittyImageLines(key string, e *imageEntry, maxCols, maxRows int) []string {
 	if w == 0 || h == 0 {
 		return nil
 	}
-	cols := min(maxCols, max((w+cellPxW-1)/cellPxW, 1))
+	cols := imageCols(e, maxCols)
 	rows := max((h*cols*cellPxW/w+cellPxH-1)/cellPxH, 1)
 	if rows > maxRows {
 		rows = maxRows

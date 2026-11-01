@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,7 @@ var (
 	htmlImgRe   = regexp.MustCompile(`(?is)<img\b[^>]*>`)
 	imgSrcRe    = regexp.MustCompile(`(?i)\bsrc\s*=\s*["']([^"']+)["']`)
 	imgAltRe    = regexp.MustCompile(`(?i)\balt\s*=\s*["']([^"']*)["']`)
+	imgWidthRe  = regexp.MustCompile(`(?i)\bwidth\s*=\s*["']?(\d+)["']?(?:\s|/|>)`)
 	emojiImgRe  = regexp.MustCompile(`(?i)\bclass\s*=\s*["'][^"']*\bemoji\b`)
 	maxImageMB  = 15
 	imageMaxRow = 40
@@ -41,12 +43,13 @@ var (
 type imageRef struct {
 	start, end int
 	url, alt   string
+	width      int // the img tag's width in CSS px, 0 if unset
 }
 
 func findImages(body string) []imageRef {
 	var refs []imageRef
 	for _, m := range mdImageRe.FindAllStringSubmatchIndex(body, -1) {
-		refs = append(refs, imageRef{m[0], m[1], body[m[4]:m[5]], body[m[2]:m[3]]})
+		refs = append(refs, imageRef{m[0], m[1], body[m[4]:m[5]], body[m[2]:m[3]], 0})
 	}
 	for _, m := range htmlImgRe.FindAllStringIndex(body, -1) {
 		tag := body[m[0]:m[1]]
@@ -58,7 +61,11 @@ func findImages(body string) []imageRef {
 		if a := imgAltRe.FindStringSubmatch(tag); a != nil {
 			alt = a[1]
 		}
-		refs = append(refs, imageRef{m[0], m[1], src[1], alt})
+		width := 0
+		if w := imgWidthRe.FindStringSubmatch(tag); w != nil {
+			width, _ = strconv.Atoi(w[1])
+		}
+		refs = append(refs, imageRef{m[0], m[1], src[1], alt, width})
 	}
 	sort.Slice(refs, func(i, j int) bool { return refs[i].start < refs[j].start })
 	return refs
@@ -82,6 +89,7 @@ func htmlImageSrcs(html string) []string {
 type imageEntry struct {
 	img      image.Image
 	kittyB64 string     // base64 PNG for kitty, built off the UI goroutine
+	cssW     int        // width GitHub draws it at, in CSS px
 	frames   []gifFrame // animated GIF frames after the first, kitty only
 	delay    int        // first frame's delay in ms
 	err      error
@@ -96,6 +104,7 @@ var (
 
 type imageJob struct {
 	key, url string // key is the markdown URL; url is what we download
+	width    int    // img tag width, 0 if unset
 }
 
 type imagesLoadedMsg struct {
@@ -121,7 +130,7 @@ func queueImages(d *prDetail, retryFailed bool) tea.Cmd {
 				dl = srcs[i]
 			}
 			imageStore[r.url] = &imageEntry{loading: true}
-			jobs = append(jobs, imageJob{r.url, dl})
+			jobs = append(jobs, imageJob{r.url, dl, r.width})
 		}
 	}
 	add(d.Body, d.BodyHTML)
@@ -166,15 +175,35 @@ func imageCachePath(key string) string {
 	return filepath.Join(cacheDir(), "img", hex.EncodeToString(sum[:]))
 }
 
-const maxImageDim = 1600
+const (
+	maxImageDim     = 1600
+	githubBodyWidth = 840 // CSS px; GitHub's comment column shrinks wider images to this
+)
 
-// finishImage bounds the decoded size and, in kitty mode, builds the payload.
-func finishImage(img image.Image) (image.Image, string) {
-	b := img.Bounds()
-	if w, h := b.Dx(), b.Dy(); w > maxImageDim || h > maxImageDim {
-		s := float64(maxImageDim) / float64(max(w, h))
-		img = resample(img, max(int(float64(w)*s), 1), max(int(float64(h)*s), 1))
+// cssWidth is how wide GitHub draws an image: its width attribute, else its
+// own width, never wider than the comment column.
+func cssWidth(attr, natural int) int {
+	if attr > 0 {
+		natural = attr
 	}
+	return min(natural, githubBodyWidth)
+}
+
+// payloadSize is the pixel size worth keeping: scale times the CSS width
+// (2 for Retina sharpness), never upscaled, at most maxImageDim on a side.
+func payloadSize(b image.Rectangle, cssW, scale int) (int, int) {
+	w, h := b.Dx(), b.Dy()
+	tw := min(w, scale*cssW)
+	th := max(h*tw/max(w, 1), 1)
+	if s := max(tw, th); s > maxImageDim {
+		tw, th = max(tw*maxImageDim/s, 1), max(th*maxImageDim/s, 1)
+	}
+	return tw, th
+}
+
+// finishImage scales img to w x h and, in kitty mode, builds the payload.
+func finishImage(img image.Image, w, h int) (image.Image, string) {
+	img = resample(img, w, h)
 	if !imagesKitty {
 		return img, ""
 	}
@@ -182,35 +211,46 @@ func finishImage(img image.Image) (image.Image, string) {
 }
 
 func loadImage(j imageJob) imageEntry {
+	var data []byte
+	var img image.Image
 	if name, ok := strings.CutPrefix(j.url, "demo:"); ok {
-		if img := demoImage(name); img != nil {
-			img, b64 := finishImage(img)
-			return imageEntry{img: img, kittyB64: b64}
+		if img = demoImage(name); img == nil {
+			return imageEntry{err: fmt.Errorf("no demo image %q", name)}
 		}
-		return imageEntry{err: fmt.Errorf("no demo image %q", name)}
-	}
-	path := imageCachePath(j.key)
-	data, err := os.ReadFile(path)
-	cached := err == nil
-	if !cached {
-		if data, err = downloadImage(j.url); err != nil {
-			return imageEntry{err: err}
+	} else {
+		path := imageCachePath(j.key)
+		var err error
+		data, err = os.ReadFile(path)
+		cached := err == nil
+		if !cached {
+			if data, err = downloadImage(j.url); err != nil {
+				return imageEntry{err: err}
+			}
+		}
+		if img, _, err = image.Decode(bytes.NewReader(data)); err != nil {
+			return imageEntry{err: fmt.Errorf("unsupported image")}
+		}
+		if !cached {
+			os.MkdirAll(filepath.Dir(path), 0755)
+			os.WriteFile(path, data, 0644)
 		}
 	}
-	img, _, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		return imageEntry{err: fmt.Errorf("unsupported image")}
-	}
-	if !cached {
-		os.MkdirAll(filepath.Dir(path), 0755)
-		os.WriteFile(path, data, 0644)
-	}
-	img, b64 := finishImage(img)
-	e := imageEntry{img: img, kittyB64: b64}
-	if imagesKitty {
+	var anim *gif.GIF
+	if imagesKitty && data != nil {
 		if g, err := gif.DecodeAll(bytes.NewReader(data)); err == nil && len(g.Image) > 1 {
-			e.frames, e.delay = gifFrames(g)
+			anim = g
 		}
+	}
+	cssW := cssWidth(j.width, img.Bounds().Dx())
+	scale := 2
+	if anim != nil {
+		scale = 1 // the terminal keeps every frame decoded
+	}
+	tw, th := payloadSize(img.Bounds(), cssW, scale)
+	img, b64 := finishImage(img, tw, th)
+	e := imageEntry{img: img, kittyB64: b64, cssW: cssW}
+	if anim != nil {
+		e.frames, e.delay = gifFrames(anim, tw, th)
 	}
 	return e
 }
@@ -223,20 +263,32 @@ type gifFrame struct {
 
 const (
 	maxGIFFrames = 300
-	minGIFFrame  = 100 // ms; faster frames are dropped to keep the payload small
+	minGIFFrame  = 100      // ms; faster frames are dropped to keep the payload small
+	gifMemory    = 24 << 20 // decoded bytes per GIF; longer GIFs drop frames evenly
 )
 
 // gifFrames composites each frame onto the canvas, since GIF frames are often
-// partial, and returns the frames after the first as changed regions, with
-// the first frame's delay. Frames that change nothing extend the previous one.
-func gifFrames(g *gif.GIF) ([]gifFrame, int) {
+// partial, scales it to w x h, and returns the frames after the first as
+// changed regions, with the first frame's delay. Frames that change nothing
+// extend the previous one.
+func gifFrames(g *gif.GIF, w, h int) ([]gifFrame, int) {
 	bounds := image.Rect(0, 0, g.Config.Width, g.Config.Height)
-	// shortcut: big GIFs stay still, since finishImage scales the first frame; scale frames too if one shows up.
-	if bounds.Dx() > maxImageDim || bounds.Dy() > maxImageDim {
-		return nil, 0
+	canvas := image.NewRGBA(bounds)
+	scaled := func() *image.RGBA {
+		if w == bounds.Dx() && h == bounds.Dy() {
+			return canvas
+		}
+		out := image.NewRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(out, out.Rect, resample(canvas, w, h), image.Point{}, draw.Src)
+		return out
 	}
-	canvas, shown := image.NewRGBA(bounds), image.NewRGBA(bounds)
+	shown := image.NewRGBA(image.Rect(0, 0, w, h))
 	delayMS := func(i int) int { return max(g.Delay[i]*10, 20) }
+	total := 0
+	for i := range g.Image[:min(len(g.Image), maxGIFFrames)] {
+		total += delayMS(i)
+	}
+	gap := max(minGIFFrame, total/max(gifMemory/(w*h*4), 2))
 	first := delayMS(0)
 	var out []gifFrame
 	for i, f := range g.Image[:min(len(g.Image), maxGIFFrames)] {
@@ -250,15 +302,16 @@ func gifFrames(g *gif.GIF) ([]gifFrame, int) {
 		if len(out) > 0 {
 			last = &out[len(out)-1].delay
 		}
-		if i > 0 {
-			if r := changedRect(shown, canvas); r.Empty() || *last < minGIFFrame {
-				*last += delayMS(i)
-			} else {
-				out = append(out, gifFrame{kittyEncode(canvas.SubImage(r)), r.Min.X, r.Min.Y, delayMS(i)})
-				copy(shown.Pix, canvas.Pix)
-			}
+		if i == 0 {
+			copy(shown.Pix, scaled().Pix)
+		} else if *last < gap {
+			*last += delayMS(i)
+		} else if cur := scaled(); changedRect(shown, cur).Empty() {
+			*last += delayMS(i)
 		} else {
-			copy(shown.Pix, canvas.Pix)
+			r := changedRect(shown, cur)
+			out = append(out, gifFrame{kittyEncode(cur.SubImage(r)), r.Min.X, r.Min.Y, delayMS(i)})
+			copy(shown.Pix, cur.Pix)
 		}
 		switch g.Disposal[i] {
 		case gif.DisposalBackground:
@@ -347,6 +400,15 @@ func handleImagesLoaded(msg imagesLoadedMsg) {
 	}
 }
 
+// imageCols is how many cells wide GitHub's size for the image is, at most maxCols.
+func imageCols(e *imageEntry, maxCols int) int {
+	w := e.cssW
+	if w == 0 {
+		w = e.img.Bounds().Dx()
+	}
+	return min(maxCols, max((w+cellPxW-1)/cellPxW, 1))
+}
+
 // imageLines renders an image at most width cells wide, or a placeholder line.
 func imageLines(ref imageRef, width int) []string {
 	th := currentDiffTheme()
@@ -365,11 +427,12 @@ func imageLines(ref imageRef, width int) []string {
 	if imagesKitty {
 		return kittyImageLines(ref.url, e, width, imageMaxRow)
 	}
-	key := fmt.Sprintf("%s\x00%d", ref.url, width)
+	cols := imageCols(e, width)
+	key := fmt.Sprintf("%s\x00%d", ref.url, cols)
 	if lines, ok := imageRenders[key]; ok {
 		return lines
 	}
-	lines := halfBlocks(e.img, width, imageMaxRow, th)
+	lines := halfBlocks(e.img, cols, imageMaxRow, th)
 	imageRenders[key] = lines
 	return lines
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"image"
 	"image/color"
 	"image/gif"
@@ -152,5 +153,65 @@ func TestAnimatedGIFLoops(t *testing.T) {
 	out := strings.Join(kittyPending, "")
 	if e.frames[1].b64 == "" || e.frames[1].x != 0 || !strings.Contains(out, "c=2") || !strings.Contains(out, "s=3") {
 		t.Fatal("frames not sent or not looped")
+	}
+}
+
+func TestImagesSizedLikeGitHub(t *testing.T) {
+	refs := findImages(`<img src="a.png" width="420"> <img width=280 src="b.png"/> <img src="c.png" width="50%"> ![d](d.png)`)
+	for i, want := range []int{420, 280, 0, 0} {
+		if refs[i].width != want {
+			t.Errorf("ref %d: width %d, want %d", i, refs[i].width, want)
+		}
+	}
+	if w := cssWidth(0, 2400); w != githubBodyWidth {
+		t.Errorf("wide images cap at the comment column, got %d", w)
+	}
+	if w, h := payloadSize(image.Rect(0, 0, 735, 1600), 280, 2); w != 560 || h != 1219 {
+		t.Errorf("want 2x the CSS width, got %dx%d", w, h)
+	}
+	if w, h := payloadSize(image.Rect(0, 0, 360, 783), 280, 2); w != 360 || h != 783 {
+		t.Errorf("small images are not upscaled, got %dx%d", w, h)
+	}
+	cellPxW = 8
+	defer func() { cellPxW = 10 }()
+	e := &imageEntry{img: image.NewNRGBA(image.Rect(0, 0, 840, 400)), cssW: 420}
+	if c := imageCols(e, 100); c != 53 {
+		t.Errorf("420 CSS px at 8px cells is 53 cols, got %d", c)
+	}
+}
+
+func TestGIFFramesScale(t *testing.T) {
+	pal := color.Palette{color.Black, color.White}
+	g := &gif.GIF{Config: image.Config{Width: 40, Height: 40, ColorModel: pal}}
+	for i := 0; i < 2; i++ {
+		f := image.NewPaletted(image.Rect(0, 0, 40, 40), pal)
+		for p := range f.Pix {
+			f.Pix[p] = uint8(i)
+		}
+		g.Image, g.Delay, g.Disposal = append(g.Image, f), append(g.Delay, 10), append(g.Disposal, gif.DisposalNone)
+	}
+	frames, _ := gifFrames(g, 20, 20)
+	if len(frames) != 1 || frames[0].x != 0 || frames[0].y != 0 {
+		t.Fatalf("want one full scaled frame, got %+v", frames)
+	}
+	img, err := png.Decode(base64.NewDecoder(base64.StdEncoding, strings.NewReader(frames[0].b64)))
+	if err != nil || img.Bounds().Dx() != 20 {
+		t.Fatalf("frame should be scaled to 20px, got %v %v", img.Bounds(), err)
+	}
+}
+
+func TestLongGIFFitsMemory(t *testing.T) {
+	pal := color.Palette{color.Black, color.White}
+	g := &gif.GIF{Config: image.Config{Width: 300, Height: 300, ColorModel: pal}}
+	for i := 0; i < 300; i++ {
+		f := image.NewPaletted(image.Rect(0, 0, 300, 300), pal)
+		for p := range f.Pix {
+			f.Pix[p] = uint8(i % 2)
+		}
+		g.Image, g.Delay, g.Disposal = append(g.Image, f), append(g.Delay, 10), append(g.Disposal, gif.DisposalNone)
+	}
+	frames, _ := gifFrames(g, 300, 300)
+	if n := (len(frames) + 1) * 300 * 300 * 4; n > gifMemory || len(frames) < 10 {
+		t.Fatalf("%d frames use %d bytes, budget %d", len(frames), n, gifMemory)
 	}
 }

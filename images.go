@@ -100,11 +100,13 @@ type imageEntry struct {
 var (
 	imageStore   = map[string]*imageEntry{}
 	imageRenders = map[string][]string{}
+	imageSources = map[string]string{} // markdown URL -> download URL, which may be signed
 )
 
 type imageJob struct {
 	key, url string // key is the markdown URL; url is what we download
 	width    int    // img tag width, 0 if unset
+	full     bool   // for the viewer: natural size, not GitHub's
 }
 
 type imagesLoadedMsg struct {
@@ -130,7 +132,8 @@ func queueImages(d *prDetail, retryFailed bool) tea.Cmd {
 				dl = srcs[i]
 			}
 			imageStore[r.url] = &imageEntry{loading: true}
-			jobs = append(jobs, imageJob{r.url, dl, r.width})
+			imageSources[r.url] = dl
+			jobs = append(jobs, imageJob{key: r.url, url: dl, width: r.width})
 		}
 	}
 	add(d.Body, d.BodyHTML)
@@ -245,6 +248,9 @@ func loadImage(j imageJob) imageEntry {
 	scale := 2
 	if anim != nil {
 		scale = 1 // the terminal keeps every frame decoded
+	}
+	if j.full {
+		cssW, scale = img.Bounds().Dx(), 1
 	}
 	tw, th := payloadSize(img.Bounds(), cssW, scale)
 	img, b64 := finishImage(img, tw, th)
@@ -411,11 +417,23 @@ func imageCols(e *imageEntry, maxCols int) int {
 
 // imageLines renders an image at most width cells wide, or a placeholder line.
 func imageLines(ref imageRef, width int) []string {
+	return imageLinesSized(ref, width, imageMaxRow)
+}
+
+func imageLabel(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		return filepath.Base(u.Path)
+	}
+	return filepath.Base(raw)
+}
+
+// imageLinesSized renders an image in at most width x maxRows cells.
+func imageLinesSized(ref imageRef, width, maxRows int) []string {
 	th := currentDiffTheme()
 	muted := sty(th.muted, "", false, false)
 	label := ref.alt
 	if label == "" {
-		label = filepath.Base(ref.url)
+		label = imageLabel(strings.TrimPrefix(ref.url, fullImagePrefix))
 	}
 	e := imageStore[ref.url]
 	switch {
@@ -425,14 +443,14 @@ func imageLines(ref imageRef, width int) []string {
 		return []string{muted.Render("▣ " + truncate(label, width-24) + " · image unavailable")}
 	}
 	if imagesKitty {
-		return kittyImageLines(ref.url, e, width, imageMaxRow)
+		return kittyImageLines(ref.url, e, width, maxRows)
 	}
 	cols := imageCols(e, width)
-	key := fmt.Sprintf("%s\x00%d", ref.url, cols)
+	key := fmt.Sprintf("%s\x00%dx%d", ref.url, cols, maxRows)
 	if lines, ok := imageRenders[key]; ok {
 		return lines
 	}
-	lines := halfBlocks(e.img, cols, imageMaxRow, th)
+	lines := halfBlocks(e.img, cols, maxRows, th)
 	imageRenders[key] = lines
 	return lines
 }
@@ -493,16 +511,37 @@ func halfBlocks(img image.Image, maxCols, maxRows int, th diffTheme) []string {
 	return out
 }
 
-// richBody is markdownLines with images rendered inline between text runs.
+// richBody is markdownLines with images rendered inline between text runs,
+// and tables of images laid out side by side as GitHub shows them.
 func richBody(body string, width int) []string {
 	body = cleanBody(body)
-	refs := findImages(body)
-	if len(refs) == 0 {
+	if len(findImages(body)) == 0 {
 		return markdownLines(body, width)
 	}
 	var out []string
+	for _, c := range splitImageTables(body) {
+		lines := inlineImages(c.text, width)
+		if c.table != nil {
+			lines = imageTableLines(c.table, width)
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, lines...)
+	}
+	return out
+}
+
+// inlineImages renders markdown with each image on its own lines.
+func inlineImages(body string, width int) []string {
+	var out []string
 	pos := 0
-	for _, r := range refs {
+	refs := findImages(body)
+	for i := 0; i < len(refs); i++ {
+		r := refs[i]
 		if r.start < pos {
 			continue
 		}
@@ -510,9 +549,16 @@ func richBody(body string, width int) []string {
 			out = append(out, text...)
 			out = append(out, "")
 		}
-		out = append(out, imageLines(r, width)...)
+		// Images separated only by spaces or a single newline sit side by side, as on GitHub.
+		row := []imageRef{r}
+		for i+1 < len(refs) && strings.TrimSpace(body[row[len(row)-1].end:refs[i+1].start]) == "" &&
+			!strings.Contains(body[row[len(row)-1].end:refs[i+1].start], "\n\n") {
+			i++
+			row = append(row, refs[i])
+		}
+		out = append(out, imageRow(row, width)...)
 		out = append(out, "")
-		pos = r.end
+		pos = row[len(row)-1].end
 	}
 	out = append(out, markdownLines(body[pos:], width)...)
 	for len(out) > 0 && out[len(out)-1] == "" {

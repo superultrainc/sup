@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestImageTableSideBySide(t *testing.T) {
@@ -16,15 +17,16 @@ func TestImageTableSideBySide(t *testing.T) {
 	defer func() { imageStore = map[string]*imageEntry{}; imageRenders = map[string][]string{} }()
 	body := "Intro\n\n| | Before | After |\n| --- | --- | --- |\n" +
 		`| Light | <img src="b1.png" width="200"> | <img src="a1.png" width="200"> |` + "\n" +
-		`| **Dark** | <img src="b2.png" width="200"> | <img src="a2.png" width="200"> |` + "\nOutro"
+		`| **Dark** | <img src="b2.png" width="200"> | <img src="a2.png" width="200"> |` + "\n" +
+		`| Clip | 40 kg: <img src="b1.png" width="200"> | [MP4](https://x.test/a.mp4) |` + "\nOutro"
 	lines := richBody(body, 60)
-	text := strings.Join(lines, "\n")
-	for _, want := range []string{"Intro", "Before", "After", "Light", "Dark", "Outro"} {
+	text := ansi.Strip(strings.Join(lines, "\n"))
+	for _, want := range []string{"Intro", "Before", "After", "Light", "Dark", "40 kg:", "MP4", "│", "─┼─", "Outro"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q", want)
 		}
 	}
-	if strings.Contains(text, "|") || strings.Contains(text, "**") {
+	if strings.Contains(text, "|") || strings.Contains(text, "**") || strings.Contains(text, "](") || strings.Contains(text, "x.test") {
 		t.Errorf("table markup leaked:\n%s", text)
 	}
 	// 200px images at 10px cells are 20 cols, so both fit on one row of 5 cell rows each.

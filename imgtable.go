@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // bodyChunk is either markdown text or a table that holds images.
@@ -71,8 +72,8 @@ func tableCells(line string) []string {
 
 const tableGap = 2
 
-// imageTableLines lays out a table with images side by side: text columns
-// (like a "Light" / "Dark" label) take what they need, image columns share the rest.
+// imageTableLines draws a table with images like glamour draws text tables:
+// text columns take what they need (up to a third), image columns share the rest.
 func imageTableLines(rows [][]string, width int) []string {
 	header, body := rows[0], rows[2:]
 	ncol := len(header)
@@ -85,8 +86,9 @@ func imageTableLines(rows [][]string, width int) []string {
 		}
 		return ""
 	}
+	const sepW = 3 // " │ "
 	widths := make([]int, ncol)
-	imgCols, used := 0, tableGap*(ncol-1)
+	imgCols, used := 0, sepW*(ncol-1)
 	for c := range widths {
 		hasImg := false
 		for _, r := range body {
@@ -99,7 +101,7 @@ func imageTableLines(rows [][]string, width int) []string {
 		for _, r := range append([][]string{header}, body...) {
 			widths[c] = max(widths[c], lipgloss.Width(plainCell(cell(r, c))))
 		}
-		widths[c] = min(widths[c], width/4)
+		widths[c] = min(widths[c], width/3)
 		used += widths[c]
 	}
 	imgW := (width - used) / max(imgCols, 1)
@@ -120,33 +122,24 @@ func imageTableLines(rows [][]string, width int) []string {
 	}
 
 	th := currentDiffTheme()
-	bold := sty(th.text, "", true, false)
-	var out []string
-	if strings.Join(header, "") != "" {
-		var sb strings.Builder
-		for c, w := range widths {
-			if c > 0 {
-				sb.WriteString(spaces(tableGap))
-			}
-			sb.WriteString(fitWidth(bold.Render(plainCell(cell(header, c))), w))
-		}
-		out = append(out, sb.String(), "")
+	divider := sty(th.divider, "", false, false)
+	sep := divider.Render(" │ ")
+	rule := make([]string, ncol)
+	for c, w := range widths {
+		rule[c] = strings.Repeat("─", w)
 	}
-	for i, r := range body {
-		if i > 0 {
-			out = append(out, "")
-		}
-		cols := make([][]string, ncol)
+	ruleLine := divider.Render(strings.Join(rule, "─┼─"))
+	join := func(cols [][]string) []string {
 		height := 0
-		for c, w := range widths {
-			cols[c] = cellLines(cell(r, c), w)
-			height = max(height, len(cols[c]))
+		for _, c := range cols {
+			height = max(height, len(c))
 		}
-		for y := 0; y < height; y++ {
+		out := make([]string, height)
+		for y := range out {
 			var sb strings.Builder
 			for c, w := range widths {
 				if c > 0 {
-					sb.WriteString(spaces(tableGap))
+					sb.WriteString(sep)
 				}
 				l := ""
 				if y < len(cols[c]) {
@@ -154,8 +147,29 @@ func imageTableLines(rows [][]string, width int) []string {
 				}
 				sb.WriteString(fitWidth(l, w))
 			}
-			out = append(out, strings.TrimRight(sb.String(), " "))
+			out[y] = sb.String()
 		}
+		return out
+	}
+
+	var out []string
+	if strings.Join(header, "") != "" {
+		bold := sty(th.text, "", true, false)
+		cols := make([][]string, ncol)
+		for c, w := range widths {
+			cols[c] = []string{bold.Render(truncate(plainCell(cell(header, c)), w))}
+		}
+		out = append(join(cols), ruleLine)
+	}
+	for i, r := range body {
+		if i > 0 {
+			out = append(out, ruleLine)
+		}
+		cols := make([][]string, ncol)
+		for c, w := range widths {
+			cols[c] = cellLines(cell(r, c), w)
+		}
+		out = append(out, join(cols)...)
 	}
 	return out
 }
@@ -197,23 +211,42 @@ func imageRow(refs []imageRef, width int) []string {
 	return out
 }
 
-// cellLines renders one table cell: its text, then its images stacked.
+// cellLines renders one table cell: its text as markdown, then its images stacked.
 func cellLines(cell string, width int) []string {
 	refs := findImages(cell)
-	if len(refs) == 0 {
-		if t := plainCell(cell); t != "" {
-			return []string{truncate(t, width)}
-		}
-		return nil
+	var sb strings.Builder
+	pos := 0
+	for _, r := range refs {
+		sb.WriteString(cell[pos:r.start])
+		pos = r.end
 	}
-	var out []string
-	for i, r := range refs {
-		if i > 0 {
+	sb.WriteString(cell[pos:])
+	text := brRe.ReplaceAllString(strings.TrimSpace(sb.String()), "\n")
+	text = cellLinkRe.ReplaceAllString(text, "$1") // a long URL would fill a narrow cell
+	out := trimBlank(markdownLines(text, width))
+	for _, r := range refs {
+		if len(out) > 0 {
 			out = append(out, "")
 		}
 		out = append(out, imageLines(r, width)...)
 	}
 	return out
+}
+
+var (
+	brRe       = regexp.MustCompile(`<br\s*/?>`)
+	cellLinkRe = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`)
+)
+
+// trimBlank drops blank lines at both ends.
+func trimBlank(lines []string) []string {
+	for len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[0])) == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 var cellMarkupRe = regexp.MustCompile("(<br\\s*/?>)|[*_`]")

@@ -48,6 +48,17 @@ func TestPreviewFollowsCursor(t *testing.T) {
 	}
 }
 
+func TestPreviewDisablesFilter(t *testing.T) {
+	m := previewModel(t, 150)
+	if m = press(t, m, "/"); m.filterMode {
+		t.Fatal("/ should not start a filter while the preview is open")
+	}
+	m = press(t, m, " ")
+	if m = press(t, m, "/"); !m.filterMode {
+		t.Fatal("/ should filter once the preview is closed")
+	}
+}
+
 func TestPreviewNeedsWidth(t *testing.T) {
 	if m := previewModel(t, 90); m.previewActive() {
 		t.Fatalf("narrow terminals should keep the full list")

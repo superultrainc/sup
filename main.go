@@ -1061,7 +1061,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.filterMode {
-			return m.handleFilterInput(msg)
+			if !m.previewActive() {
+				return m.handleFilterInput(msg)
+			}
+			m.filterMode = false // the preview's shortcuts win over typing
 		}
 		// Esc clears an active filter first; only quits when nothing to clear.
 		if msg.String() == "esc" {
@@ -1436,6 +1439,9 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.startRefresh()
 
 	case "/":
+		if m.previewActive() {
+			return m, nil // typed filters would swallow the preview's PR shortcuts
+		}
 		m.filterMode = true
 		m.filterText = ""
 		return m, nil
@@ -1735,7 +1741,7 @@ func (m model) helpSections() []helpSection {
 			{"ctrl+d / u", "Scroll preview"},
 		}},
 		{"Filter", [][2]string{
-			{"/", "Open filter"},
+			{"/", "Open filter (preview closed)"},
 			{"s / S", "Cycle status (fwd / back)"},
 			{"p / P", "Cycle repo (fwd / back)"},
 			{"#repo", "Filter by repo"},

@@ -14,3 +14,22 @@ func TestReviewerChangeIsOptimistic(t *testing.T) {
 		t.Fatalf("after removing the team: %v", got)
 	}
 }
+
+func TestPickerOpensWithCachedPeople(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	pr := PR{}
+	pr.Repository.Owner.Login = "acme"
+	pr.Author.Login = "me"
+	if p := newReviewerPicker(pr, nil); !p.loading {
+		t.Fatal("no cache yet, so the picker should load")
+	}
+	savePeople("acme", []reviewerCandidate{{id: "max", name: "Max", suggested: true}, {id: "me"}, {id: "acme/web", team: true}})
+	p := newReviewerPicker(pr, nil)
+	if p.loading || !p.stale || len(p.cands) != 2 || p.cands[0].id != "max" || p.cands[0].suggested {
+		t.Fatalf("want cached people without the author or suggestions, got %+v", p.cands)
+	}
+	p.setCandidates([]reviewerCandidate{{id: "max"}, {id: "ben"}}, "me", nil)
+	if p.stale || len(p.cands) != 2 {
+		t.Fatal("fresh people should replace the cache")
+	}
+}

@@ -867,7 +867,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reviewerCandidatesMsg:
 		if v := m.detail; v != nil && v.picker != nil && prKey(v.pr) == msg.key {
 			if msg.err != nil {
-				v.picker.loading, v.picker.err = false, msg.err
+				v.picker.loading, v.picker.stale, v.picker.err = false, false, msg.err
 			} else {
 				latest, _ := latestReviewStates(v.detail)
 				v.picker.setCandidates(msg.cands, v.pr.Author.Login, latest)
@@ -932,7 +932,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinnerTickMsg:
 		// Spin only while something is loading.
 		if m.loading || m.refreshing || m.actionPending || (m.detail != nil && ((m.detail.loading && m.detail.detail == nil) || (m.detail.diffLoading && m.detail.diff == nil) ||
-			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.saving)))) ||
+			(m.detail.picker != nil && (m.detail.picker.loading || m.detail.picker.stale || m.detail.picker.saving)))) ||
 			(m.merge != nil && m.mergeDetail() == nil) || len(m.merging) > 0 {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
 			return m, spinnerTick()
@@ -1923,6 +1923,9 @@ func (m model) view() string {
 	}
 	if m.gallery != nil {
 		return m.galleryView()
+	}
+	if m.detail != nil && m.detail.picker != nil {
+		return overlayCenter(m.detailView(), m.pickerView(), m.width, m.height)
 	}
 	if m.detail != nil {
 		return m.detailView()

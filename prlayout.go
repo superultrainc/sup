@@ -210,8 +210,6 @@ func (m model) detailView() string {
 	bodyH := v.bodyHeight(m.height)
 	var rows []string
 	switch {
-	case v.picker != nil:
-		rows = m.pickerView(bodyH)
 	case v.tab != tabFiles && v.detail == nil:
 		rows = []string{"", m.placeholder(v.err, "Loading PR...")}
 	case v.tab == tabFiles && v.diff == nil:
@@ -304,8 +302,6 @@ func (m model) detailFooter() string {
 	switch {
 	case v.search != nil && v.search.typing:
 		help = " type to search · enter keep · esc cancel"
-	case v.picker != nil:
-		help = " ↑/↓ move · space toggle · type to filter · enter save · esc cancel"
 	default:
 		help = " ctrl+k commands · / search · tab next tab · esc back · ? help"
 	}

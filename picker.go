@@ -3,12 +3,15 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // reviewerCandidate is a user login or, for teams, "org/slug" (what gh expects).
@@ -21,6 +24,7 @@ type reviewerCandidate struct {
 
 type reviewerPicker struct {
 	loading  bool
+	stale    bool // showing cached people while the fetch runs
 	saving   bool
 	err      error
 	cands    []reviewerCandidate
@@ -56,7 +60,53 @@ func newReviewerPicker(pr PR, d *prDetail) *reviewerPicker {
 	for id := range initial {
 		selected[id] = true
 	}
-	return &reviewerPicker{loading: true, selected: selected, initial: initial}
+	p := &reviewerPicker{loading: true, selected: selected, initial: initial}
+	if cached := loadPeople(pr.Repository.Owner.Login); len(cached) > 0 {
+		latest, _ := latestReviewStates(d)
+		p.setCandidates(cached, pr.Author.Login, latest)
+		p.stale = true
+	}
+	return p
+}
+
+// cachedPerson is one candidate as saved on disk, per repo owner.
+type cachedPerson struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+	Team bool   `json:"team,omitempty"`
+}
+
+func peoplePath(owner string) string {
+	return filepath.Join(cacheDir(), "people", filepath.Base(owner)+".json")
+}
+
+// loadPeople returns the owner's last fetched people, so the picker opens filled.
+func loadPeople(owner string) []reviewerCandidate {
+	data, err := os.ReadFile(peoplePath(owner))
+	if err != nil {
+		return nil
+	}
+	var people []cachedPerson
+	if json.Unmarshal(data, &people) != nil {
+		return nil
+	}
+	cands := make([]reviewerCandidate, len(people))
+	for i, c := range people {
+		cands[i] = reviewerCandidate{id: c.ID, name: c.Name, team: c.Team}
+	}
+	return cands
+}
+
+// savePeople stores candidates without per-PR suggestions.
+func savePeople(owner string, cands []reviewerCandidate) {
+	people := make([]cachedPerson, len(cands))
+	for i, c := range cands {
+		people[i] = cachedPerson{c.id, c.name, c.team}
+	}
+	data, _ := json.Marshal(people)
+	path := peoplePath(owner)
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, data, 0644)
 }
 
 func (p *reviewerPicker) visible() []reviewerCandidate {
@@ -176,6 +226,7 @@ func fetchReviewerCandidatesCmd(pr PR) tea.Cmd {
 				cands = append(cands, reviewerCandidate{id: owner + "/" + t.Slug, name: t.Name, team: true})
 			}
 		}
+		savePeople(owner, cands)
 		return reviewerCandidatesMsg{key: key, cands: cands}
 	}
 }
@@ -217,8 +268,17 @@ func (p *reviewerPicker) setCandidates(cands []reviewerCandidate, author string,
 		}
 		return strings.ToLower(filtered[i].id) < strings.ToLower(filtered[j].id)
 	})
+	cur := ""
+	if vis := p.visible(); p.cursor < len(vis) {
+		cur = vis[p.cursor].id
+	}
 	p.cands = filtered
-	p.loading = false
+	p.loading, p.stale = false, false
+	for i, c := range p.visible() {
+		if c.id == cur {
+			p.cursor = i
+		}
+	}
 }
 
 type reviewersSavedMsg struct {
@@ -375,23 +435,27 @@ func applyReviewerChange(d *prDetail, add, remove []string) {
 	d.ReviewRequests.Nodes = nodes
 }
 
-// pickerView renders the picker card to fill height rows.
-func (m model) pickerView(height int) []string {
+// pickerView renders the picker as a modal box.
+func (m model) pickerView() string {
 	v := m.detail
 	p := v.picker
 	th := currentDiffTheme()
-	width := m.width - 2
-	title := sectionHeadStyle.Render("Request reviewers") + metaStyle.Render(" · type to filter · space toggle · enter save · esc cancel")
+	width := min(76, max(m.width-8, 30))
+	muted := sty(th.muted, "", false, false)
 
-	body := []string{filterStyle.Render("› ") + p.query + filterStyle.Render("█"), ""}
+	title := sty(th.text, "", true, false).Render("Request reviewers")
+	if p.stale {
+		title += muted.Render("  " + spinnerFrames[m.spinnerFrame] + " updating")
+	}
+	body := []string{title, "", filterStyle.Render("› ") + p.query + filterStyle.Render("█"), ""}
 	latest, _ := latestReviewStates(v.detail)
 	vis := p.visible()
-	listH := max(height-len(body)-3, 1)
+	listH := max(min(14, m.height-16), 3)
 	switch {
 	case p.loading:
 		body = append(body, reviewRequestedStyle.Render(spinnerFrames[m.spinnerFrame]+" Loading people..."))
 	case p.err != nil && len(p.cands) == 0:
-		body = append(body, changesRequestedStyle.Render("Error: "+p.err.Error()))
+		body = append(body, changesRequestedStyle.Render(truncate("Error: "+p.err.Error(), width)))
 	case len(vis) == 0:
 		body = append(body, metaStyle.Render("No matches."))
 	default:
@@ -413,13 +477,13 @@ func (m model) pickerView(height int) []string {
 			if i == p.cursor {
 				idStyle = selectedNormalStyle
 			}
-			line := caret + box + idStyle.Render(pad(c.id, 24)) + metaStyle.Render(pad(truncate(c.name, 22), 24))
+			line := caret + box + idStyle.Render(pad(truncate(c.id, 22), 24)) + metaStyle.Render(pad(truncate(c.name, 20), 22))
 			var tags []string
 			switch latest[c.id] {
 			case "APPROVED":
 				tags = append(tags, approvedStyle.Render("✓ approved"))
 			case "CHANGES_REQUESTED":
-				tags = append(tags, changesRequestedStyle.Render("✗ changes requested"))
+				tags = append(tags, changesRequestedStyle.Render("✗ changes"))
 			case "COMMENTED":
 				tags = append(tags, commentedStyle.Render("● commented"))
 			}
@@ -429,29 +493,35 @@ func (m model) pickerView(height int) []string {
 			if c.team {
 				tags = append(tags, pathStyle.Render("team"))
 			}
-			body = append(body, line+strings.Join(tags, "  "))
+			body = append(body, fitWidth(line+strings.Join(tags, "  "), width))
 		}
 	}
-	if p.saving {
-		body = append(body, "", reviewRequestedStyle.Render(spinnerFrames[m.spinnerFrame]+" Saving..."))
-	} else if p.err != nil && len(p.cands) > 0 {
-		body = append(body, "", changesRequestedStyle.Render("Error: "+p.err.Error()))
-	} else if add, remove := p.changes(); len(add)+len(remove) > 0 {
+	for len(body) < 4+listH {
+		body = append(body, "") // keep the box one size while loading and filtering
+	}
+	body = append(body, "")
+	switch {
+	case p.saving:
+		body = append(body, reviewRequestedStyle.Render(spinnerFrames[m.spinnerFrame]+" Saving..."))
+	case p.err != nil && len(p.cands) > 0:
+		body = append(body, changesRequestedStyle.Render(truncate("Error: "+p.err.Error(), width)))
+	default:
 		summary := ""
-		if len(add) > 0 {
-			summary += approvedStyle.Render("+ " + strings.Join(add, ", "))
-		}
-		if len(remove) > 0 {
-			if summary != "" {
-				summary += "   "
+		if add, remove := p.changes(); len(add)+len(remove) > 0 {
+			if len(add) > 0 {
+				summary += approvedStyle.Render("+ " + strings.Join(add, ", "))
 			}
-			summary += changesRequestedStyle.Render("− " + strings.Join(remove, ", "))
+			if len(remove) > 0 {
+				if summary != "" {
+					summary += "   "
+				}
+				summary += changesRequestedStyle.Render("− " + strings.Join(remove, ", "))
+			}
 		}
-		body = append(body, "", summary)
+		body = append(body, fitWidth(summary, width))
 	}
-	out := textCard(title, th.threadBorder, body, width)
-	for i := range out {
-		out[i] = " " + out[i]
-	}
-	return out
+	body = append(body, "", sty("16", th.addBar, true, false).Render(" enter ")+" "+sty(th.text, "", false, false).Render("Save")+"    "+
+		sty(th.text, th.chipBg, false, false).Render(" esc ")+" "+muted.Render("Cancel")+"    "+muted.Render("space toggle · ↑↓ move · type to filter"))
+	frame := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(th.threadBorder)).Padding(1, 3).Width(width + 6)
+	return frame.Render(strings.Join(body, "\n"))
 }

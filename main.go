@@ -1964,27 +1964,35 @@ func (m model) view() string {
 	var s strings.Builder
 	lp := newListPainters()
 
-	// Fixed column widths
-	const (
-		colStatus   = 12
-		colNum      = 6
-		colAuthor   = 14
-		colReviewer = 14
-		colDiff     = 16 // approximate width for +/- stats
-		colPadding  = 4  // cursor + spacing
-	)
-
-	// Calculate dynamic column widths based on terminal width
-	fixedWidth := colStatus + colNum + colAuthor + colReviewer + colDiff + colPadding
-	flexWidth := m.width - fixedWidth
-	if flexWidth < 60 {
-		flexWidth = 60 // minimum for flexible columns
+	// Columns are as wide as their widest value in the filtered list (not just
+	// the visible rows, so they don't shift while scrolling), plus a gap.
+	const gap = 2
+	colStatus, colNum, colRepo, colAuthor, colReviewer, colBranch := 6, 1, 4, 6, 8, 6 // header widths
+	maxTitle, leftDiff, rightDiff := 5, 1, 1
+	for _, pr := range m.filtered {
+		colStatus = max(colStatus, displayWidth(badgeLabels[m.rowKind(pr)]))
+		colNum = max(colNum, len(strconv.Itoa(pr.Number))+1)
+		colRepo = max(colRepo, displayWidth(pr.Repository.Name))
+		colAuthor = max(colAuthor, displayWidth(pr.Author.Login))
+		colReviewer = max(colReviewer, displayWidth(getReviewer(pr)))
+		colBranch = max(colBranch, displayWidth(pr.HeadRefName))
+		maxTitle = max(maxTitle, displayWidth(pr.Title))
+		if !pr.Partial {
+			leftDiff = max(leftDiff, len(strconv.Itoa(pr.Additions))+1)
+			rightDiff = max(rightDiff, len(strconv.Itoa(pr.Deletions))+1)
+		}
 	}
-
-	// Distribute flexible space: 30% repo, 40% title, 30% branch
-	colRepo := flexWidth * 30 / 100
-	colTitle := flexWidth * 40 / 100
-	colBranch := flexWidth - colRepo - colTitle
+	colStatus, colNum = colStatus+gap, colNum+gap
+	colRepo, colAuthor = min(colRepo, 24)+gap, min(colAuthor, 16)+gap
+	colReviewer, colBranch = min(colReviewer, 16)+gap, min(colBranch, 32)+gap
+	colDiff := leftDiff + 1 + rightDiff
+	// The title takes what's left, at least 20; on narrow terminals branch, reviewer and repo give way first.
+	avail := m.width - 2 - colStatus - colNum - colRepo - colAuthor - colReviewer - colBranch - colDiff
+	for _, col := range []*int{&colBranch, &colReviewer, &colRepo} {
+		cut := max(min(20-avail, *col-10), 0)
+		*col, avail = *col-cut, avail+cut
+	}
+	colTitle := max(min(maxTitle+gap, avail), 20)
 
 	s.WriteString("\n")
 	separatorWidth := m.width - 2 // account for "  " prefix
@@ -2067,14 +2075,12 @@ func (m model) view() string {
 
 			kind := m.rowKind(pr)
 			label := badgeLabels[kind]
-			repo, repoW := padW(truncate(pr.Repository.Name, colRepo-1), colRepo)
+			repo, repoW := padW(truncate(pr.Repository.Name, colRepo-gap), colRepo)
 			num, numW := padW("#"+strconv.Itoa(pr.Number), colNum)
-			title, titleW := padW(truncate(pr.Title, colTitle-1), colTitle)
-			author, authorW := padW(truncate(pr.Author.Login, colAuthor-1), colAuthor)
-			reviewer, reviewerW := padW(truncate(getReviewer(pr), colReviewer-1), colReviewer)
-			branch, branchW := padW(truncate(pr.HeadRefName, colBranch-1), colBranch)
-			leftDiff := (colDiff - 1) / 2
-			rightDiff := colDiff - 1 - leftDiff
+			title, titleW := padW(truncate(pr.Title, colTitle-gap), colTitle)
+			author, authorW := padW(truncate(pr.Author.Login, colAuthor-gap), colAuthor)
+			reviewer, reviewerW := padW(truncate(getReviewer(pr), colReviewer-gap), colReviewer)
+			branch, branchW := padW(truncate(pr.HeadRefName, colBranch-gap), colBranch)
 			addsText, delsText := "+"+strconv.Itoa(pr.Additions), "-"+strconv.Itoa(pr.Deletions)
 			if pr.Partial {
 				addsText, delsText = "", ""
@@ -2087,7 +2093,7 @@ func (m model) view() string {
 			}
 			currentWidth := len(cursor) + statusW + repoW + numW + titleW + authorW + reviewerW + branchW + addsW + 1 + delsW
 			statusFill := ""
-			if n := colStatus - len(label); n > 0 {
+			if n := colStatus - displayWidth(label); n > 0 {
 				statusFill = spaces(n)
 			}
 

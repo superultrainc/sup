@@ -1,27 +1,27 @@
 
   
-  STATUS      #     REPO                        TITLE                                AUTHOR        REVIEWER      BRANCH                       +/-
+  STATUS       #     REPO    TITLE                                                                    AUTHOR    REVIEWER          BRANCH             +/-
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  [Draft]     #100  repo-0                      Fix thing 0 with a rather long ti... author0       reviewer-w... feature/branch-0                  +0       -0
-  [Approved]  #101  repo-1                      Fix thing 1                          author1       reviewer-w... feature/branch-1                 +13       -7
-» [Denied]    #102  repo-2                      Fix thing 2                          author2       reviewer-w... feature/branch-2                 +26      -14
-  [Commented] #103  repo-3                      Fix thing 3 with a rather long ti... author3       reviewer-w... feature/branch-3                 +39      -21
-  [Review]    #104  repo-4                      Fix thing 4                          author4       reviewer-w... feature/branch-4                 +52      -28
-  [Approved]  #105  repo-0                      Fix thing 5                          author5       reviewer-w... feature/branch-5                 +65      -35
-  [Denied]    #106  repo-1                      Fix thing 6 with a rather long ti... author6       reviewer-w... feature/branch-6                 +78      -42
-  [Draft]     #107  repo-2                      Fix thing 7                          author7       reviewer-w... feature/branch-7                 +91      -49
-  [Review]    #108  repo-3                      Fix thing 8                          author8       reviewer-w... feature/branch-8                +104      -56
-  [Approved]  #109  repo-4                      Fix thing 9 with a rather long ti... author9       reviewer-w... feature/branch-9                +117      -63
-  [Denied]    #110  repo-0                      Fix thing 10                         author10      reviewer-w... feature/branch-10               +130      -70
-  [Commented] #111  repo-1                      Fix thing 11                         author11      reviewer-w... feature/branch-11               +143      -77
-  [Review]    #112  repo-2                      Fix thing 12 with a rather long t... author12      reviewer-w... feature/branch-12               +156      -84
-  [Approved]  #113  repo-3                      Fix thing 13                         author13      reviewer-w... feature/branch-13               +169      -91
-  [Draft]     #114  repo-4                      Fix thing 14                         author14      reviewer-w... feature/branch-14               +182      -98
-  [Commented] #115  repo-0                      Fix thing 15 with a rather long t... author15      reviewer-w... feature/branch-15               +195     -105
-  [Review]    #116  repo-1                      Fix thing 16                         author16      reviewer-w... feature/branch-16               +208     -112
-  [Approved]  #117  repo-2                      Fix thing 17                         author17      reviewer-w... feature/branch-17               +221     -119
-  [Denied]    #118  repo-3                      Fix thing 18 with a rather long t... author18      reviewer-w... feature/branch-18               +234     -126
-  [Commented] #119  repo-4                      Fix thing 19                         author19      reviewer-w... feature/branch-19               +247     -133
+  [Draft]      #100  repo-0  Fix thing 0 with a rather long title that gets truncated at this width   author0   reviewer-with...  feature/branch-0     +0   -0
+  [Approved]   #101  repo-1  Fix thing 1                                                              author1   reviewer-with...  feature/branch-1    +13   -7
+» [Denied]     #102  repo-2  Fix thing 2                                                              author2   reviewer-with...  feature/branch-2    +26  -14
+  [Commented]  #103  repo-3  Fix thing 3 with a rather long title that gets truncated at this width   author3   reviewer-with...  feature/branch-3    +39  -21
+  [Review]     #104  repo-4  Fix thing 4                                                              author4   reviewer-with...  feature/branch-4    +52  -28
+  [Approved]   #105  repo-0  Fix thing 5                                                              author5   reviewer-with...  feature/branch-5    +65  -35
+  [Denied]     #106  repo-1  Fix thing 6 with a rather long title that gets truncated at this width   author6   reviewer-with...  feature/branch-6    +78  -42
+  [Draft]      #107  repo-2  Fix thing 7                                                              author7   reviewer-with...  feature/branch-7    +91  -49
+  [Review]     #108  repo-3  Fix thing 8                                                              author8   reviewer-with...  feature/branch-8   +104  -56
+  [Approved]   #109  repo-4  Fix thing 9 with a rather long title that gets truncated at this width   author9   reviewer-with...  feature/branch-9   +117  -63
+  [Denied]     #110  repo-0  Fix thing 10                                                             author10  reviewer-with...  feature/branch-10  +130  -70
+  [Commented]  #111  repo-1  Fix thing 11                                                             author11  reviewer-with...  feature/branch-11  +143  -77
+  [Review]     #112  repo-2  Fix thing 12 with a rather long title that gets truncated at this width  author12  reviewer-with...  feature/branch-12  +156  -84
+  [Approved]   #113  repo-3  Fix thing 13                                                             author13  reviewer-with...  feature/branch-13  +169  -91
+  [Draft]      #114  repo-4  Fix thing 14                                                             author14  reviewer-with...  feature/branch-14  +182  -98
+  [Commented]  #115  repo-0  Fix thing 15 with a rather long title that gets truncated at this width  author15  reviewer-with...  feature/branch-15  +195 -105
+  [Review]     #116  repo-1  Fix thing 16                                                             author16  reviewer-with...  feature/branch-16  +208 -112
+  [Approved]   #117  repo-2  Fix thing 17                                                             author17  reviewer-with...  feature/branch-17  +221 -119
+  [Denied]     #118  repo-3  Fix thing 18 with a rather long title that gets truncated at this width  author18  reviewer-with...  feature/branch-18  +234 -126
+  [Commented]  #119  repo-4  Fix thing 19                                                             author19  reviewer-with...  feature/branch-19  +247 -133
 
   20 PRs
   ctrl+k: commands · /: filter · space: preview · enter: open · ?: help

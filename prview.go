@@ -151,6 +151,20 @@ type prDetail struct {
 		RebaseMergeAllowed       bool   `json:"rebaseMergeAllowed"`
 		ViewerDefaultMergeMethod string `json:"viewerDefaultMergeMethod"`
 	} `json:"repository"`
+	// BaseRef carries branch rules that can narrow the repo's merge methods.
+	BaseRef *struct {
+		Rules struct {
+			Nodes []struct {
+				Type       string `json:"type"`
+				Parameters *struct {
+					AllowedMergeMethods []string `json:"allowedMergeMethods"`
+				} `json:"parameters"`
+			} `json:"nodes"`
+		} `json:"rules"`
+		BranchProtectionRule *struct {
+			RequiresLinearHistory bool `json:"requiresLinearHistory"`
+		} `json:"branchProtectionRule"`
+	} `json:"baseRef"`
 	Labels struct {
 		Nodes []prLabel `json:"nodes"`
 	} `json:"labels"`
@@ -205,6 +219,10 @@ const prDetailQuery = `{
 			id isCrossRepository headRefOid updatedAt mergeStateStatus viewerCanMergeAsAdmin
 			autoMergeRequest { mergeMethod }
 			repository { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerDefaultMergeMethod }
+			baseRef {
+				rules(first: 50) { nodes { type parameters { ... on PullRequestParameters { allowedMergeMethods } } } }
+				branchProtectionRule { requiresLinearHistory }
+			}
 			labels(first: 20) { nodes { name color } }
 			assignees(first: 10) { nodes { login } }
 			allCommits: commits(first: 100) { nodes { commit {

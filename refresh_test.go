@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,6 +31,7 @@ func TestRefreshFetchesOnlyChangedRows(t *testing.T) {
 
 	orgs = []string{"superultrainc"}
 	m.startRefresh()
+	m.handleDiscovered(discoveredMsg{refreshID: m.refreshID}) // the author:@me shard, empty
 	cmd := m.handleDiscovered(discoveredMsg{refreshID: m.refreshID, stubs: discovered})
 
 	// Closed #3 is pruned and new #9 shows up immediately, as a partial row.
@@ -89,5 +91,16 @@ func TestSortDraftsLastThenRecentlyUpdated(t *testing.T) {
 	sortPRs(prs)
 	if got := numbers(prs); got[0] != 2 || got[1] != 1 || got[2] != 3 {
 		t.Fatalf("want [2 1 3], got %v", got)
+	}
+}
+
+func TestSearchShardsIncludeOwnPRsOutsideOrgs(t *testing.T) {
+	old, oldMine := orgs, mineMode
+	defer func() { orgs, mineMode = old, oldMine }()
+	orgs, mineMode = []string{"acme", "beta"}, false
+	got := searchShards()
+	want := []string{"org:acme is:pr is:open", "org:beta is:pr is:open", "author:@me is:pr is:open -org:acme -org:beta"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %q", got)
 	}
 }

@@ -80,7 +80,7 @@ func TestMergePinsHeadAndDeletesBranch(t *testing.T) {
 	pr := testPR("sup", "neil", 7, false, "")
 	d := &prDetail{HeadRefOid: "abc123", HeadRefName: "feature/x"}
 	md := mergeDialog{deleteBranch: true}
-	ref, err := mergePR(pr, d, md, allMergeMethods[0])
+	ref, _, err := mergePR(pr, d, md, allMergeMethods[0])
 	if err != nil || ref != "feature/x" {
 		t.Fatalf("merge should succeed and hand back the branch, got %q, %v", ref, err)
 	}
@@ -99,7 +99,7 @@ func TestMergePinsHeadAndDeletesBranch(t *testing.T) {
 	// A fork's branch is never deleted.
 	*reqs = nil
 	d.IsCrossRepo = true
-	if ref, _ := mergePR(pr, d, md, allMergeMethods[0]); ref != "" || len(*reqs) != 1 {
+	if ref, _, _ := mergePR(pr, d, md, allMergeMethods[0]); ref != "" || len(*reqs) != 1 {
 		t.Fatalf("fork merge should not delete a branch, sent %d requests", len(*reqs))
 	}
 }
@@ -108,7 +108,7 @@ func TestAutoMergeUsesMutation(t *testing.T) {
 	reqs := fakeGitHub(t, nil)
 	pr := testPR("sup", "neil", 7, false, "")
 	d := &prDetail{ID: "PR_kwDO123", HeadRefOid: "abc"}
-	if _, err := mergePR(pr, d, mergeDialog{auto: true}, allMergeMethods[0]); err != nil {
+	if _, _, err := mergePR(pr, d, mergeDialog{auto: true}, allMergeMethods[0]); err != nil {
 		t.Fatal(err)
 	}
 	r := (*reqs)[0]

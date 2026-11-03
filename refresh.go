@@ -47,10 +47,12 @@ func searchShards() []string {
 		return []string{"involves:@me is:pr is:open"}
 	}
 	var s []string
+	mine := "author:@me is:pr is:open" // your PRs elsewhere, e.g. open source
 	for _, o := range orgs {
 		s = append(s, "org:"+o+" is:pr is:open")
+		mine += " -org:" + o
 	}
-	return s
+	return append(s, mine)
 }
 
 type discoveredMsg struct {

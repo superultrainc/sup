@@ -2011,7 +2011,7 @@ func (m model) view() string {
 	if m.compactList {
 		s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("#", colNum) + "TITLE"))
 	} else {
-		s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("REPO", colRepo) + pad("#", colNum) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
+		s.WriteString(lp.dim.Render("  " + pad("STATUS", colStatus) + pad("#", colNum) + pad("REPO", colRepo) + pad("TITLE", colTitle) + pad("AUTHOR", colAuthor) + pad("REVIEWER", colReviewer) + pad("BRANCH", colBranch) + "+/-"))
 	}
 	s.WriteString("\n")
 	s.WriteString(lp.dim.Render("  " + strings.Repeat("─", separatorWidth)))
@@ -2094,8 +2094,8 @@ func (m model) view() string {
 			if isSelected {
 				s.WriteString(lp.caret.Render(cursor))
 				s.WriteString(lp.selBadge[kind].Render(label) + statusFill)
-				s.WriteString(lp.selNormal.Render(repo))
 				s.WriteString(lp.selNormal.Render(num))
+				s.WriteString(lp.selNormal.Render(repo))
 				s.WriteString(lp.selNormal.Render(title))
 				s.WriteString(lp.selAuthor.Render(author))
 				s.WriteString(lp.selReviewer.Render(reviewer))
@@ -2106,8 +2106,8 @@ func (m model) view() string {
 			} else {
 				s.WriteString(cursor)
 				s.WriteString(lp.badge[kind].Render(label) + statusFill)
-				s.WriteString(lp.normal.Render(repo))
 				s.WriteString(lp.normal.Render(num))
+				s.WriteString(lp.normal.Render(repo))
 				s.WriteString(lp.normal.Render(title))
 				s.WriteString(lp.dim.Render(author))
 				s.WriteString(lp.reviewer.Render(reviewer))

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -202,6 +203,32 @@ func TestAutoMergeAndQueueKeepRowMerging(t *testing.T) {
 		m.handleMergeDone(msg)
 		if len(m.prs) != 3 || statusKind(m.prs[1]) != statusMerging {
 			t.Fatalf("%+v: row should stay and show [Merging], got %d rows", msg, len(m.prs))
+		}
+	}
+}
+
+func TestBranchRulesNarrowMergeMethods(t *testing.T) {
+	ids := func(body string) string {
+		var d prDetail
+		if err := json.Unmarshal([]byte(`{"repository":{"mergeCommitAllowed":true,"squashMergeAllowed":true,"rebaseMergeAllowed":true}`+body+`}`), &d); err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, m := range allowedMergeMethods(&d) {
+			out = append(out, m.id)
+		}
+		return strings.Join(out, ",")
+	}
+	cases := map[string]string{
+		``:                "SQUASH,MERGE,REBASE",
+		`,"baseRef":null`: "SQUASH,MERGE,REBASE",
+		`,"baseRef":{"rules":{"nodes":[{"type":"PULL_REQUEST","parameters":{"allowedMergeMethods":["SQUASH"]}}]}}`: "SQUASH",
+		`,"baseRef":{"rules":{"nodes":[{"type":"REQUIRED_LINEAR_HISTORY","parameters":null}]}}`:                    "SQUASH,REBASE",
+		`,"baseRef":{"rules":{"nodes":[]},"branchProtectionRule":{"requiresLinearHistory":true}}`:                  "SQUASH,REBASE",
+	}
+	for body, want := range cases {
+		if got := ids(body); got != want {
+			t.Errorf("%s: got %s, want %s", body, got, want)
 		}
 	}
 }

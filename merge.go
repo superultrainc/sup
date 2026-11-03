@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -54,10 +55,34 @@ func allowedMergeMethods(d *prDetail) []mergeMethod {
 		case m.id == "SQUASH" && d.Repository.SquashMergeAllowed,
 			m.id == "MERGE" && d.Repository.MergeCommitAllowed,
 			m.id == "REBASE" && d.Repository.RebaseMergeAllowed:
-			out = append(out, m)
+			if branchAllows(d, m.id) {
+				out = append(out, m)
+			}
 		}
 	}
 	return out
+}
+
+// branchAllows applies the base branch's rulesets and protection on top of the
+// repo settings, which GitHub enforces too (e.g. "merge commits not allowed").
+func branchAllows(d *prDetail, method string) bool {
+	b := d.BaseRef
+	if b == nil {
+		return true
+	}
+	if method == "MERGE" && b.BranchProtectionRule != nil && b.BranchProtectionRule.RequiresLinearHistory {
+		return false
+	}
+	for _, r := range b.Rules.Nodes {
+		switch {
+		case r.Type == "REQUIRED_LINEAR_HISTORY" && method == "MERGE":
+			return false
+		case r.Type == "PULL_REQUEST" && r.Parameters != nil && len(r.Parameters.AllowedMergeMethods) > 0 &&
+			!slices.Contains(r.Parameters.AllowedMergeMethods, method):
+			return false
+		}
+	}
+	return true
 }
 
 // selectedMethod falls back to the first allowed method when the stored one isn't allowed.

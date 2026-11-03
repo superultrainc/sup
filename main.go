@@ -755,7 +755,8 @@ func startEditorCmd(action string, pr PR) (tea.Cmd, error) {
 	if editor == "" {
 		editor = "vi"
 	}
-	editorCmd := exec.Command(editor, tmpPath)
+	// Through the shell like git does, so EDITOR can carry arguments ("code --wait").
+	editorCmd := exec.Command("sh", "-c", editor+` "$1"`, "sh", tmpPath)
 	return tea.ExecProcess(editorCmd, func(err error) tea.Msg {
 		defer os.Remove(tmpPath)
 		if err != nil {

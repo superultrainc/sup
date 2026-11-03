@@ -193,3 +193,15 @@ func TestMergeModal(t *testing.T) {
 		}
 	}
 }
+
+func TestAutoMergeAndQueueKeepRowMerging(t *testing.T) {
+	for _, msg := range []mergeDoneMsg{{auto: true, merged: true}, {queued: true, merged: true}} {
+		m := listViewModel(3, 160)
+		msg.pr = m.prs[1]
+		m.merging = map[string]int{prKey(msg.pr): msg.pr.Number}
+		m.handleMergeDone(msg)
+		if len(m.prs) != 3 || statusKind(m.prs[1]) != statusMerging {
+			t.Fatalf("%+v: row should stay and show [Merging], got %d rows", msg, len(m.prs))
+		}
+	}
+}

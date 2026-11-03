@@ -108,3 +108,30 @@ func TestListViewFitsWidthAndShowsRows(t *testing.T) {
 		}
 	}
 }
+
+func TestMergingBadgeOverridesReviewState(t *testing.T) {
+	m := listViewModel(3, 160)
+	pr := m.filtered[1]
+	if m.rowKind(pr) == statusMerging {
+		t.Fatal("not merging yet")
+	}
+	m.merging = map[string]int{prKey(pr): pr.Number}
+	if m.rowKind(pr) != statusMerging || !strings.Contains(m.view(), "[Merging]") {
+		t.Fatal("merging PR should show [Merging] in the list")
+	}
+}
+
+func TestRequestingReviewersShowsReviewBadge(t *testing.T) {
+	pr := testPR("repo", "me", 1, false, "", "")
+	pr.ReviewRequests.Nodes = nil
+	if statusKind(pr) != 5 {
+		t.Fatalf("want Open, got %s", statusBadgeLabel(pr))
+	}
+	pr = withReviewerChange(pr, []string{"max", "org/backend"}, nil)
+	if statusKind(pr) != 4 || statusLabelForFilter(pr) != "review" {
+		t.Fatalf("want Review after requesting, got %s", statusBadgeLabel(pr))
+	}
+	if pr = withReviewerChange(pr, nil, []string{"max", "org/backend"}); statusKind(pr) != 5 {
+		t.Fatalf("want Open after removing all, got %s", statusBadgeLabel(pr))
+	}
+}

@@ -75,9 +75,8 @@ func (m model) splitView() string {
 }
 
 // compactRow is a list row for the narrow preview list: status, number, title.
-func compactRow(pr PR, selected bool, width int, lp listPainters) string {
+func compactRow(pr PR, kind int, selected bool, width int, lp listPainters) string {
 	const colStatus, colNum = 12, 6
-	kind := statusKind(pr)
 	label := badgeLabels[kind]
 	fill := spaces(max(colStatus-len(label), 0))
 	num := pad("#"+strconv.Itoa(pr.Number), colNum)

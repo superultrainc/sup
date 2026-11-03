@@ -267,7 +267,9 @@ type PR struct {
 			Login string `json:"login"`
 		} `json:"owner"`
 	} `json:"repository"`
-	ReviewDecision string `json:"reviewDecision"`
+	ReviewDecision string    `json:"reviewDecision"`
+	IsInMergeQueue bool      `json:"isInMergeQueue,omitempty"`
+	AutoMerge      *struct{} `json:"autoMergeRequest,omitempty"` // non-nil once auto-merge is on
 	ReviewRequests struct {
 		TotalCount int `json:"totalCount"`
 		Nodes      []struct {
@@ -663,7 +665,7 @@ func submitReviewCmd(action string, pr PR, body string) tea.Cmd {
 
 // prRowFields are the PR fields a list row needs.
 const prRowFields = `number title headRefName headRefOid updatedAt isDraft additions deletions
-	author { login } reviewDecision
+	author { login } reviewDecision isInMergeQueue autoMergeRequest { enabledAt }
 	reviewRequests(first: 5) { totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
 	reviews(last: 5) { nodes { author { login } state } }`
 
@@ -1595,17 +1597,31 @@ func (m *model) cycleStatusFilter(delta int) {
 
 // Status kinds index the badge painters; order matches statusKind.
 var (
-	badgeLabels    = [7]string{"[Draft]", "[Approved]", "[Denied]", "[Commented]", "[Review]", "[Open]", "[…]"}
-	badgeColors    = [7]string{"241", "78", "196", "117", "214", "39", "238"}
-	badgeSelColors = [7]string{"250", "114", "203", "159", "221", "81", "244"}
+	badgeLabels    = [8]string{"[Draft]", "[Approved]", "[Denied]", "[Commented]", "[Review]", "[Open]", "[…]", "[Merging]"}
+	badgeColors    = [8]string{"241", "78", "196", "117", "214", "39", "238", "141"}
+	badgeSelColors = [8]string{"250", "114", "203", "159", "221", "81", "244", "183"}
 )
 
 // statusPending is a row discovered but not yet loaded; its review state is unknown.
 const statusPending = 6
 
+// statusMerging is a row merging: in flight here, queued, or set to auto-merge.
+const statusMerging = 7
+
+// rowKind is the list badge for pr: a merge in flight outranks its review state.
+func (m model) rowKind(pr PR) int {
+	if _, ok := m.merging[prKey(pr)]; ok {
+		return statusMerging
+	}
+	return statusKind(pr)
+}
+
 func statusKind(pr PR) int {
 	if pr.Partial {
 		return statusPending
+	}
+	if pr.IsInMergeQueue || pr.AutoMerge != nil {
+		return statusMerging
 	}
 	if pr.IsDraft {
 		return 0
@@ -1619,6 +1635,9 @@ func statusKind(pr PR) int {
 		if len(pr.Reviews.Nodes) > 0 && pr.Reviews.Nodes[0].State == "COMMENTED" {
 			return 3
 		}
+		return 4
+	}
+	if len(pr.ReviewRequests.Nodes) > 0 { // repos without required reviews leave the decision empty
 		return 4
 	}
 	return 5
@@ -1649,9 +1668,11 @@ func statusLabelForFilter(pr PR) string {
 			return "commented"
 		}
 		return "review"
-	default:
-		return "open"
 	}
+	if len(pr.ReviewRequests.Nodes) > 0 {
+		return "review"
+	}
+	return "open"
 }
 
 // banner shows a prompt or action result as a colored pill so it stands out.
@@ -2034,7 +2055,7 @@ func (m model) view() string {
 			pr := m.filtered[i]
 			isSelected := m.cursor == i
 			if m.compactList {
-				s.WriteString(compactRow(pr, isSelected, rowWidth+2, lp) + "\n")
+				s.WriteString(compactRow(pr, m.rowKind(pr), isSelected, rowWidth+2, lp) + "\n")
 				continue
 			}
 
@@ -2043,7 +2064,7 @@ func (m model) view() string {
 				cursor = "» "
 			}
 
-			kind := statusKind(pr)
+			kind := m.rowKind(pr)
 			label := badgeLabels[kind]
 			repo, repoW := padW(truncate(pr.Repository.Name, colRepo-1), colRepo)
 			num, numW := padW("#"+strconv.Itoa(pr.Number), colNum)
@@ -2137,7 +2158,7 @@ type listPainters struct {
 	caret, selNormal, selAuthor, selReviewer painter
 	selBranch, selAdds, selDels              painter
 	normal, reviewer, branch, adds, dels     painter
-	badge, selBadge                          [7]painter
+	badge, selBadge                          [len(badgeLabels)]painter
 }
 
 func newListPainters() listPainters {

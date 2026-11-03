@@ -128,6 +128,7 @@ type mergeDoneMsg struct {
 	pr     PR
 	method mergeMethod
 	auto   bool
+	queued bool // went into a merge queue, so the PR stays open for now
 	ready  bool // marked ready for review rather than merged
 	draft  bool // converted back to a draft
 	closed bool // closed without merging
@@ -197,35 +198,36 @@ func runMergeCmd(pr PR, d *prDetail, md mergeDialog, method mergeMethod) tea.Cmd
 			}
 			return msg
 		}
-		msg.deleteRef, msg.err = mergePR(pr, d, md, method)
+		msg.deleteRef, msg.queued, msg.err = mergePR(pr, d, md, method)
 		return msg
 	}
 }
 
 // mergePR merges through the API. Merge queues need gh's queue handling, so
 // that one case falls back to `gh pr merge`.
-// It returns the branch to delete afterwards, so the merge reports without waiting on that.
-func mergePR(pr PR, d *prDetail, md mergeDialog, method mergeMethod) (deleteRef string, err error) {
+// It returns the branch to delete afterwards, so the merge reports without waiting on that,
+// and whether the PR went into a merge queue instead of merging.
+func mergePR(pr PR, d *prDetail, md mergeDialog, method mergeMethod) (deleteRef string, queued bool, err error) {
 	if md.auto {
 		out, err := graphqlPOST(fmt.Sprintf(`mutation { enablePullRequestAutoMerge(input: {pullRequestId: %q, mergeMethod: %s}) { clientMutationId } }`, d.ID, method.id))
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
-		return "", graphqlErrors(out)
+		return "", false, graphqlErrors(out)
 	}
 	// sha makes GitHub refuse if commits landed after this view loaded, so nothing unreviewed merges.
 	body := map[string]string{"merge_method": strings.ToLower(method.id), "sha": d.HeadRefOid}
 	if _, err := githubREST("PUT", fmt.Sprintf("%s/pulls/%d/merge", repoPath(pr), pr.Number), body); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "merge queue") {
-			return "", ghMerge(pr, d, md, method)
+			return "", !md.admin, ghMerge(pr, d, md, method) // admin merges skip the queue
 		}
-		return "", err
+		return "", false, err
 	}
 	// A fork's branch isn't ours to delete.
 	if md.deleteBranch && !d.IsCrossRepo && d.HeadRefName != "" {
-		return d.HeadRefName, nil
+		return d.HeadRefName, false, nil
 	}
-	return "", nil
+	return "", false, nil
 }
 
 type branchDeletedMsg struct{ err error }
@@ -381,8 +383,23 @@ func (m *model) handleMergeDone(msg mergeDoneMsg) tea.Cmd {
 		sortPRs(m.prs) // drafts sort last
 		m.applyFilterKeepingCursor()
 		save = m.markPRsDirty()
-	case msg.auto:
+	case msg.auto, msg.queued:
 		m.actionStatus = fmt.Sprintf("✓ Auto-merge enabled for #%d (%s)", msg.pr.Number, strings.ToLower(msg.method.label))
+		if msg.queued {
+			m.actionStatus = fmt.Sprintf("✓ Added #%d to the merge queue", msg.pr.Number)
+		}
+		for i := range m.prs {
+			if prKey(m.prs[i]) == key {
+				// Keeps the row [Merging] until GitHub merges it.
+				if msg.queued {
+					m.prs[i].IsInMergeQueue = true
+				} else {
+					m.prs[i].AutoMerge = &struct{}{}
+				}
+			}
+		}
+		m.applyFilterKeepingCursor()
+		save = m.markPRsDirty()
 	default:
 		if msg.closed {
 			m.actionStatus = fmt.Sprintf("✓ Closed #%d", msg.pr.Number)

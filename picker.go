@@ -173,12 +173,15 @@ func fetchReviewerCandidatesCmd(pr PR) tea.Cmd {
 				} `json:"repository"`
 			} `json:"data"`
 		}
-		var teams struct {
+		var org struct {
 			Data struct {
 				Organization *struct {
 					Teams struct {
 						Nodes []struct{ Slug, Name string } `json:"nodes"`
 					} `json:"teams"`
+					Members struct {
+						Nodes []struct{ Login, Name string } `json:"nodes"`
+					} `json:"membersWithRole"`
 				} `json:"organization"`
 			} `json:"data"`
 		}
@@ -198,8 +201,12 @@ func fetchReviewerCandidatesCmd(pr PR) tea.Cmd {
 		}()
 		go func() {
 			defer wg.Done()
-			if out, err := graphqlPOST(fmt.Sprintf(`{ organization(login: "%s") { teams(first: 100) { nodes { slug name } } } }`, owner)); err == nil {
-				json.Unmarshal(out, &teams)
+			// shortcut: first 100 teams and members only; paginate if an org outgrows that.
+			if out, err := graphqlPOST(fmt.Sprintf(`{ organization(login: "%s") {
+				teams(first: 100) { nodes { slug name } }
+				membersWithRole(first: 100) { nodes { login name } }
+			} }`, owner)); err == nil {
+				json.Unmarshal(out, &org)
 			}
 		}()
 		wg.Wait()
@@ -221,8 +228,14 @@ func fetchReviewerCandidatesCmd(pr PR) tea.Cmd {
 				cands = append(cands, reviewerCandidate{id: u.Login, name: u.Name})
 			}
 		}
-		if teams.Data.Organization != nil {
-			for _, t := range teams.Data.Organization.Teams.Nodes {
+		if o := org.Data.Organization; o != nil {
+			for _, u := range o.Members.Nodes {
+				if !seen[u.Login] {
+					seen[u.Login] = true
+					cands = append(cands, reviewerCandidate{id: u.Login, name: u.Name})
+				}
+			}
+			for _, t := range o.Teams.Nodes {
 				cands = append(cands, reviewerCandidate{id: owner + "/" + t.Slug, name: t.Name, team: true})
 			}
 		}
@@ -346,7 +359,7 @@ func (m model) handlePickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.applyDetail(v.detail)
 		}
 		m.actionStatus = reviewersText(add, remove)
-		return m, saveReviewersCmd(v.pr, add, remove)
+		return m, tea.Batch(m.applyRefreshedPRs([]PR{withReviewerChange(v.pr, add, remove)}), saveReviewersCmd(v.pr, add, remove))
 	case "up", "ctrl+p", "ctrl+k":
 		p.cursor = max(p.cursor-1, 0)
 	case "down", "ctrl+n", "ctrl+j":
@@ -433,6 +446,40 @@ func applyReviewerChange(d *prDetail, add, remove []string) {
 		nodes = append(nodes, n)
 	}
 	d.ReviewRequests.Nodes = nodes
+}
+
+// withReviewerChange is pr with its list-row review requests edited, so the
+// status badge moves before GitHub answers.
+func withReviewerChange(pr PR, add, remove []string) PR {
+	drop := map[string]bool{}
+	for _, id := range remove {
+		drop[id] = true
+		if _, slug, ok := strings.Cut(id, "/"); ok {
+			drop[slug] = true
+		}
+	}
+	nodes := pr.ReviewRequests.Nodes[:0:0]
+	for _, n := range pr.ReviewRequests.Nodes {
+		if r := n.RequestedReviewer; !drop[r.Login] && (r.Login != "" || !drop[r.Name]) {
+			nodes = append(nodes, n)
+		}
+	}
+	for _, id := range add {
+		var n struct {
+			RequestedReviewer struct {
+				Login string `json:"login"`
+				Name  string `json:"name"`
+			} `json:"requestedReviewer"`
+		}
+		if _, slug, ok := strings.Cut(id, "/"); ok {
+			n.RequestedReviewer.Name = slug
+		} else {
+			n.RequestedReviewer.Login = id
+		}
+		nodes = append(nodes, n)
+	}
+	pr.ReviewRequests.Nodes = nodes
+	return pr
 }
 
 // pickerView renders the picker as a modal box.

@@ -19,7 +19,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -151,27 +150,21 @@ func queueImages(d *prDetail, retryFailed bool) tea.Cmd {
 	if len(jobs) == 0 {
 		return nil
 	}
-	return func() tea.Msg {
-		results := make(map[string]imageEntry, len(jobs))
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, 4)
-		for _, j := range jobs {
-			wg.Add(1)
-			go func(j imageJob) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				e := loadImage(j)
-				mu.Lock()
-				results[j.key] = e
-				mu.Unlock()
-			}(j)
+	// One message per image, so each shows as soon as it's ready instead of
+	// waiting on the slowest download in the PR.
+	cmds := make([]tea.Cmd, len(jobs))
+	for i, j := range jobs {
+		j := j
+		cmds[i] = func() tea.Msg {
+			imageSem <- struct{}{}
+			defer func() { <-imageSem }()
+			return imagesLoadedMsg{results: map[string]imageEntry{j.key: loadImage(j)}}
 		}
-		wg.Wait()
-		return imagesLoadedMsg{results: results}
 	}
+	return tea.Batch(cmds...)
 }
+
+var imageSem = make(chan struct{}, 4) // concurrent image loads
 
 func imageCachePath(key string) string {
 	sum := sha1.Sum([]byte(key))

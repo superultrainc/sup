@@ -159,3 +159,15 @@ func TestPaletteCheckout(t *testing.T) {
 		t.Fatalf("palette checkout should select the PR and quit")
 	}
 }
+
+func TestEscClosesConfirmBeforeFilter(t *testing.T) {
+	m := initialModel()
+	m.filterText = "x"
+	for _, k := range []string{"esc", "q"} {
+		m.confirmAction, m.confirmPR = "approve", &PR{}
+		m = press(t, m, k)
+		if m.confirmAction != "" || m.filterText != "x" || m.quitting {
+			t.Fatalf("%s should close the confirm only, got action=%q filter=%q quitting=%v", k, m.confirmAction, m.filterText, m.quitting)
+		}
+	}
+}

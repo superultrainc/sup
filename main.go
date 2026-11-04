@@ -1053,6 +1053,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.detail != nil {
 			return m.handleDetailInput(msg)
 		}
+		// The confirm modal owns esc/q, ahead of the filter and quit keys.
+		if m.confirmAction != "" {
+			return m.handleNormalInput(msg)
+		}
 		// Allow quitting even during animation
 		if msg.String() == "q" {
 			m.quitting = true

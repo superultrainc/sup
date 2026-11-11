@@ -33,6 +33,9 @@ func githubREST(method, path string, body any) ([]byte, error) {
 		req.Header.Set("Authorization", "Bearer "+ghToken)
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		if strings.Contains(path, "/merge-async") { // only exists in the newer API version
+			req.Header.Set("X-GitHub-Api-Version", "2026-03-10")
+		}
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}

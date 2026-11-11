@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -243,16 +244,66 @@ func mergePR(pr PR, d *prDetail, md mergeDialog, method mergeMethod) (deleteRef 
 	// sha makes GitHub refuse if commits landed after this view loaded, so nothing unreviewed merges.
 	body := map[string]string{"merge_method": strings.ToLower(method.id), "sha": d.HeadRefOid}
 	if _, err := githubREST("PUT", fmt.Sprintf("%s/pulls/%d/merge", repoPath(pr), pr.Number), body); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "merge queue") {
+		lower := strings.ToLower(err.Error())
+		switch {
+		case strings.Contains(lower, "asynchronous merge"): // stacked PRs only merge through merge-async
+			if queued, err = mergeAsync(pr, md, body); err != nil || queued {
+				return "", queued, err
+			}
+		case strings.Contains(lower, "merge queue"):
 			return "", !md.admin, ghMerge(pr, d, md, method) // admin merges skip the queue
+		default:
+			return "", false, err
 		}
-		return "", false, err
 	}
 	// A fork's branch isn't ours to delete.
 	if md.deleteBranch && !d.IsCrossRepo && d.HeadRefName != "" {
 		return d.HeadRefName, false, nil
 	}
 	return "", false, nil
+}
+
+var mergeAsyncPoll = time.Second
+
+// mergeAsync submits to GitHub's async merge API and polls until it settles.
+// queued means the PR went into a merge queue rather than merging.
+func mergeAsync(pr PR, md mergeDialog, body map[string]string) (queued bool, err error) {
+	path := fmt.Sprintf("%s/pulls/%d/merge-async", repoPath(pr), pr.Number)
+	req := map[string]any{"merge_method": body["merge_method"], "sha": body["sha"], "bypass_rules": md.admin}
+	if md.admin {
+		req["merge_action"] = "direct_merge"
+	}
+	var r struct {
+		Status  string `json:"status"`
+		Details struct {
+			UUID    string `json:"uuid"`
+			Message string `json:"message"`
+		} `json:"details"`
+	}
+	out, err := githubREST("PUT", path, req)
+	// shortcut: gives up after ~2 min of pending; the merge may still land on GitHub.
+	for i := 0; err == nil; i++ {
+		if err = json.Unmarshal(out, &r); err != nil {
+			return false, err
+		}
+		switch r.Status {
+		case "merged":
+			return false, nil
+		case "enqueued":
+			return true, nil
+		case "failed":
+			if r.Details.Message == "" {
+				r.Details.Message = "merge failed"
+			}
+			return false, fmt.Errorf("%s", r.Details.Message)
+		}
+		if i >= 120 || r.Details.UUID == "" {
+			return false, fmt.Errorf("merge still pending on GitHub")
+		}
+		time.Sleep(mergeAsyncPoll)
+		out, err = githubREST("GET", path+"/"+r.Details.UUID, nil)
+	}
+	return false, err
 }
 
 type branchDeletedMsg struct{ err error }

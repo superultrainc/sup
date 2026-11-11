@@ -125,3 +125,30 @@ func TestAPIErrorMessage(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestStackedMergeFallsBackToAsync(t *testing.T) {
+	mergeAsyncPoll = 0
+	reqs := fakeGitHub(t, map[string]string{
+		"PUT /repos/superultrainc/sup/pulls/7/merge":          "422 " + `{"message":"Merging stacked PRs via this endpoint is not supported. Use the asynchronous merge endpoint instead."}`,
+		"PUT /repos/superultrainc/sup/pulls/7/merge-async":    "200 " + `{"status":"pending","details":{"uuid":"u1"}}`,
+		"GET /repos/superultrainc/sup/pulls/7/merge-async/u1": "200 " + `{"status":"merged","details":{}}`,
+	})
+	pr := testPR("sup", "neil", 7, false, "")
+	d := &prDetail{HeadRefOid: "abc123", HeadRefName: "feature/x"}
+	ref, queued, err := mergePR(pr, d, mergeDialog{deleteBranch: true}, allMergeMethods[0])
+	if err != nil || queued || ref != "feature/x" {
+		t.Fatalf("got %q, %v, %v", ref, queued, err)
+	}
+	async := (*reqs)[1]
+	if async.body["merge_method"] != "squash" || async.body["sha"] != "abc123" || len(*reqs) != 3 {
+		t.Fatalf("unexpected requests: %+v", *reqs)
+	}
+
+	fakeGitHub(t, map[string]string{
+		"PUT /repos/superultrainc/sup/pulls/7/merge":       "422 " + `{"message":"Use the asynchronous merge endpoint instead."}`,
+		"PUT /repos/superultrainc/sup/pulls/7/merge-async": "200 " + `{"status":"failed","details":{"message":"Required checks failed"}}`,
+	})
+	if _, _, err := mergePR(pr, d, mergeDialog{}, allMergeMethods[0]); err == nil || err.Error() != "Required checks failed" {
+		t.Fatalf("want rule failure surfaced, got %v", err)
+	}
+}

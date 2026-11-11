@@ -917,6 +917,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case repoJumpMsg:
+		m.repoFilterIndex = msg.index
+		m.applyFilter()
+		return m, nil
+
 	case checkoutMsg:
 		if pr, ok := m.currentPR(); ok {
 			m.selected = &pr

@@ -58,8 +58,28 @@ func (m model) paletteCommands() []paletteCommand {
 			out = append(out, paletteCommand{"", "Checkout PR", sec.title, checkoutMsg{}})
 		}
 	}
+	if m.detail == nil {
+		// Typed queries list repos first so ctrl+k, a few letters, enter jumps to one.
+		var repos []paletteCommand
+		for i, r := range m.repos {
+			if strings.Contains(strings.ToLower(r+" repos"), q) {
+				repos = append(repos, paletteCommand{"", r, "Repos", repoJumpMsg{i}})
+			}
+		}
+		if m.repoFilterIndex >= 0 && strings.Contains("all repos", q) {
+			repos = append(repos, paletteCommand{"", "All repos", "Repos", repoJumpMsg{-1}})
+		}
+		if q != "" {
+			out = append(repos, out...)
+		} else {
+			out = append(out, repos...)
+		}
+	}
 	return out
 }
+
+// repoJumpMsg pins the list to one repo (-1 clears it), from the palette.
+type repoJumpMsg struct{ index int }
 
 // checkoutMsg checks out the current PR; it's palette-only, too disruptive for a key.
 type checkoutMsg struct{}

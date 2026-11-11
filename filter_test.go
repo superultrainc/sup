@@ -238,3 +238,17 @@ func TestPRRefreshKeepsRepoFilter(t *testing.T) {
 		t.Fatalf("after refresh: want [3], got %v", got)
 	}
 }
+
+func TestPaletteJumpsToRepo(t *testing.T) {
+	m := sampleModel()
+	m.palette = &commandPalette{}
+	m = press(t, m, "i", "o", "s", "enter")
+	if m.currentRepo() != "superwhisper-ios" || len(m.filtered) != 2 {
+		t.Fatalf("expected superwhisper-ios pinned, got %q %v", m.currentRepo(), numbers(m.filtered))
+	}
+	m.palette = &commandPalette{}
+	m = press(t, m, "a", "l", "l", " ", "r", "e", "p", "o", "enter")
+	if m.repoFilterIndex != -1 || len(m.filtered) != 4 {
+		t.Fatalf("expected filter cleared, got %d", m.repoFilterIndex)
+	}
+}

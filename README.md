@@ -94,8 +94,8 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `d` | Open the PR view on its diff (Files changed tab) |
 | `m` | Merge PR: pick squash / merge commit / rebase, delete the branch, or enable auto-merge |
 | `A` | Approve PR (with `y`/`n` confirm) |
-| `D` | Request changes — opens `$EDITOR` for body |
-| `M` | Comment on PR — opens `$EDITOR` for body |
+| `D` | Request changes — write the body in a modal (`@` completes people, `ctrl+s` sends) |
+| `M` | Comment on PR — same modal as `D` |
 | `W` | Convert PR to a draft, or mark a draft ready for review (with `y`/`n` confirm) |
 | `X` | Close PR (with `y`/`n` confirm) |
 | `?` | Toggle full help overlay |

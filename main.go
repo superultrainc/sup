@@ -312,6 +312,8 @@ type model struct {
 	gallery           *imageGallery     // non-nil while the image viewer is open
 	palette           *commandPalette   // non-nil while the command palette is open
 	merge             *mergeDialog      // non-nil while the merge modal is open
+	comment           *commentDialog    // non-nil while the comment modal is open
+	drafts            map[string]string // unsent comment text, by action and PR
 	merging           map[string]int    // prKey -> number of merges in flight
 	previewOn         bool              // split the list with a preview of the cursor's PR
 	preview           *prDetailView     // the preview pane's view, kept separate from detail
@@ -339,13 +341,6 @@ type model struct {
 
 func prKey(pr PR) string {
 	return fmt.Sprintf("%s/%s#%d", pr.Repository.Owner.Login, pr.Repository.Name, pr.Number)
-}
-
-type editorDoneMsg struct {
-	action string
-	pr     PR
-	body   string
-	err    error
 }
 
 type reviewSubmittedMsg struct {
@@ -743,33 +738,6 @@ func fetchSinglePRCmd(pr PR) tea.Cmd {
 	}
 }
 
-func startEditorCmd(action string, pr PR) (tea.Cmd, error) {
-	f, err := os.CreateTemp("", fmt.Sprintf("sup-review-%d-*.md", pr.Number))
-	if err != nil {
-		return nil, err
-	}
-	tmpPath := f.Name()
-	f.Close()
-
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
-	}
-	// Through the shell like git does, so EDITOR can carry arguments ("code --wait").
-	editorCmd := exec.Command("sh", "-c", editor+` "$1"`, "sh", tmpPath)
-	return tea.ExecProcess(editorCmd, func(err error) tea.Msg {
-		defer os.Remove(tmpPath)
-		if err != nil {
-			return editorDoneMsg{action: action, pr: pr, err: err}
-		}
-		body, readErr := os.ReadFile(tmpPath)
-		if readErr != nil {
-			return editorDoneMsg{action: action, pr: pr, err: readErr}
-		}
-		return editorDoneMsg{action: action, pr: pr, body: strings.TrimSpace(string(body))}
-	}), nil
-}
-
 func refreshMetaCmd() tea.Msg {
 	if demoMode {
 		return metaRefreshedMsg{orgs: orgs, currentUser: currentUser}
@@ -868,6 +836,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleHover(msg)
 
 	case reviewerCandidatesMsg:
+		if cd := m.comment; cd != nil && prKey(cd.pr) == msg.key && msg.err == nil {
+			cd.setPeople(msg.cands, m.commentDetail())
+		}
 		if v := m.detail; v != nil && v.picker != nil && prKey(v.pr) == msg.key {
 			if msg.err != nil {
 				v.picker.loading, v.picker.stale, v.picker.err = false, false, msg.err
@@ -946,18 +917,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, spinnerTick()
 		}
 		return m, nil
-
-	case editorDoneMsg:
-		if msg.err != nil {
-			m.actionStatus = "Error: " + msg.err.Error()
-			return m, nil
-		}
-		if msg.body == "" {
-			m.actionStatus = fmt.Sprintf("%s cancelled (empty body)", msg.action)
-			return m, nil
-		}
-		m.actionStatus = reviewDoneText(msg.action, msg.pr)
-		return m, submitReviewCmd(msg.action, msg.pr, msg.body)
 
 	case reviewSubmittedMsg:
 		if msg.err != nil {
@@ -1038,6 +997,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.merge != nil {
 			return m.handleMergeInput(msg)
+		}
+		if m.comment != nil {
+			return m.handleCommentInput(msg)
 		}
 		if msg.String() == "ctrl+k" && !m.textInputActive() {
 			m.helpMode = false
@@ -1530,12 +1492,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if pr, ok := m.currentPR(); ok {
-			cmd, err := startEditorCmd("request-changes", pr)
-			if err != nil {
-				m.actionStatus = "Error: " + err.Error()
-				return m, nil
-			}
-			return m, cmd
+			return m, m.openComment("request-changes", pr)
 		}
 		return m, nil
 
@@ -1544,12 +1501,7 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if pr, ok := m.currentPR(); ok {
-			cmd, err := startEditorCmd("comment", pr)
-			if err != nil {
-				m.actionStatus = "Error: " + err.Error()
-				return m, nil
-			}
-			return m, cmd
+			return m, m.openComment("comment", pr)
 		}
 		return m, nil
 
@@ -1943,6 +1895,11 @@ func (m model) view() string {
 		under := m // render the screen underneath without the modal
 		under.merge = nil
 		return overlayCenter(under.view(), m.mergeView(), m.width, m.height)
+	}
+	if m.comment != nil {
+		under := m // render the screen underneath without the modal
+		under.comment = nil
+		return overlayCenter(under.view(), m.commentView(), m.width, m.height)
 	}
 	if m.confirmPR != nil {
 		under := m // render the screen underneath without the modal

@@ -86,7 +86,7 @@ type checkoutMsg struct{}
 
 // textInputActive is true while a prompt owns typed keys, so ctrl+k stays theirs.
 func (m model) textInputActive() bool {
-	if m.filterMode || m.confirmAction != "" || m.merge != nil {
+	if m.filterMode || m.confirmAction != "" || m.merge != nil || m.comment != nil {
 		return true
 	}
 	v := m.detail

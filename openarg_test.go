@@ -33,6 +33,15 @@ func TestParsePRArgs(t *testing.T) {
 	if pr, err := parsePRArgs([]string{"other", "7"}, prs, []string{"acme"}); err != nil || pr.Repository.Name != "other" || pr.Repository.Owner.Login != "acme" {
 		t.Errorf("single-org fallback: got %+v, %v", pr, err)
 	}
+	sw := []PR{repoPR("s", "homerow-macos", 5, ""), repoPR("s", "superwhisper-macos", 1111, ""), repoPR("s", "superwhisper-ios", 6, "")}
+	for _, args := range [][]string{{"macos", "1111"}, {"whispermacos", "1111"}, {"whisper", "macos", "1111"}, {"supermac", "1111"}, {"superwhisper-macos#9"}} {
+		if pr, err := parsePRArgs(args, sw, nil); err != nil || pr.Repository.Name != "superwhisper-macos" {
+			t.Errorf("fuzzy %v: got %+v, %v", args, pr, err)
+		}
+	}
+	if _, err := parsePRArgs([]string{"macos", "9"}, sw, nil); err == nil {
+		t.Errorf("ambiguous macos 9: expected error")
+	}
 	for _, args := range [][]string{{"acme/web#x"}, {"api", "1"}, {"nope#42"}, {"https://github.com/acme/web/issues/42"}, {"a/b/c#1"}, {"a", "b", "c"}} {
 		if _, err := parsePRArgs(args, prs, nil); err == nil {
 			t.Errorf("%v: expected error", args)

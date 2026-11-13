@@ -3,20 +3,24 @@ package main
 import (
 	"fmt"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 type openPRMsg struct{ pr PR }
 
-// parsePRArgs accepts a PR URL, owner/repo#N, repo#N, `repo N`, or N / #N (repo from the current dir's origin).
+// parsePRArgs accepts a PR URL, owner/repo#N, repo#N, `repo [words...] N`, or N / #N (repo from the current dir's origin).
 func parsePRArgs(args []string, prs []PR, orgs []string) (PR, error) {
 	var pr PR
 	var slug, num string
 	switch len(args) {
-	case 2:
-		slug, num = args[0], strings.TrimPrefix(args[1], "#")
+	case 0:
+		return pr, fmt.Errorf("expected a PR")
+	default:
+		slug, num = strings.Join(args[:len(args)-1], " "), strings.TrimPrefix(args[len(args)-1], "#")
 	case 1:
 		s := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(args[0], "https://"), "http://"), "/")
 		if rest, ok := strings.CutPrefix(s, "github.com/"); ok {
@@ -34,16 +38,14 @@ func parsePRArgs(args []string, prs []PR, orgs []string) (PR, error) {
 				return pr, err
 			}
 		}
-	default:
-		return pr, fmt.Errorf("expected one PR (or a repo and a number), got %d args", len(args))
-	}
-	if !strings.Contains(slug, "/") {
-		var err error
-		if slug, err = resolveRepo(slug, prs, orgs); err != nil {
-			return pr, err
-		}
 	}
 	n, err := strconv.Atoi(num)
+	if !strings.Contains(slug, "/") {
+		var rerr error
+		if slug, rerr = resolveRepo(slug, n, prs, orgs); rerr != nil {
+			return pr, rerr
+		}
+	}
 	owner, name, ok := strings.Cut(slug, "/")
 	if err != nil || n <= 0 || !ok || owner == "" || name == "" || strings.Contains(name, "/") {
 		return pr, fmt.Errorf("can't parse PR %q (use a URL, owner/repo#N, repo N, or N inside a repo)", strings.Join(args, " "))
@@ -53,9 +55,12 @@ func parsePRArgs(args []string, prs []PR, orgs []string) (PR, error) {
 	return pr, nil
 }
 
-// resolveRepo maps a repo name or unique substring to owner/repo using listed PRs, else the only org.
-func resolveRepo(q string, prs []PR, orgs []string) (string, error) {
-	var exact, partial []string
+// resolveRepo maps a repo query to owner/repo using listed PRs, else the only org.
+// Ignoring case and punctuation, it tries exact, then substring, then in-order letters ("supermac");
+// ties go to the one repo with listed PR n.
+func resolveRepo(q string, n int, prs []PR, orgs []string) (string, error) {
+	nq := normRepo(q)
+	var tiers [3][]string
 	seen := map[string]bool{}
 	for _, pr := range prs {
 		slug := pr.Repository.Owner.Login + "/" + pr.Repository.Name
@@ -63,14 +68,29 @@ func resolveRepo(q string, prs []PR, orgs []string) (string, error) {
 			continue
 		}
 		seen[slug] = true
-		switch name := strings.ToLower(pr.Repository.Name); {
-		case name == strings.ToLower(q):
-			exact = append(exact, slug)
-		case strings.Contains(name, strings.ToLower(q)):
-			partial = append(partial, slug)
+		switch name := normRepo(pr.Repository.Name); {
+		case name == nq:
+			tiers[0] = append(tiers[0], slug)
+		case strings.Contains(name, nq):
+			tiers[1] = append(tiers[1], slug)
+		case isSubseq(nq, name):
+			tiers[2] = append(tiers[2], slug)
 		}
 	}
-	for _, m := range [][]string{exact, partial} {
+	for _, m := range tiers {
+		if len(m) > 1 && n > 0 {
+			var has []string
+			for _, slug := range m {
+				if slices.ContainsFunc(prs, func(pr PR) bool {
+					return pr.Number == n && pr.Repository.Owner.Login+"/"+pr.Repository.Name == slug
+				}) {
+					has = append(has, slug)
+				}
+			}
+			if len(has) == 1 {
+				m = has
+			}
+		}
 		if len(m) == 1 {
 			return m[0], nil
 		}
@@ -79,10 +99,30 @@ func resolveRepo(q string, prs []PR, orgs []string) (string, error) {
 			return "", fmt.Errorf("%q matches %s", q, strings.Join(m, ", "))
 		}
 	}
-	if len(orgs) == 1 {
+	if len(orgs) == 1 && !strings.Contains(q, " ") {
 		return orgs[0] + "/" + q, nil
 	}
 	return "", fmt.Errorf("unknown repo %q", q)
+}
+
+func normRepo(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return unicode.ToLower(r)
+		}
+		return -1
+	}, s)
+}
+
+func isSubseq(sub, s string) bool {
+	for _, r := range sub {
+		i := strings.IndexRune(s, r)
+		if i < 0 {
+			return false
+		}
+		s = s[i+1:]
+	}
+	return true
 }
 
 // originSlug returns owner/repo for the current dir's origin remote.
@@ -111,7 +151,7 @@ func completions(repo string, prs []PR, orgs []string) []string {
 	var out []string
 	add := func(id, title string) { out = append(out, id+":"+strings.ReplaceAll(title, ":", `\:`)) }
 	if repo != "" {
-		slug, err := resolveRepo(repo, prs, orgs)
+		slug, err := resolveRepo(repo, 0, prs, orgs)
 		if err != nil {
 			return nil
 		}

@@ -348,6 +348,11 @@ func (m model) handlePickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v.picker = nil
 	case "enter":
 		add, remove := p.changes()
+		// Nothing toggled: Enter requests the highlighted person in one keystroke.
+		if len(add)+len(remove) == 0 && p.cursor < len(vis) {
+			p.selected[vis[p.cursor].id] = true
+			add, remove = p.changes()
+		}
 		if len(add) == 0 && len(remove) == 0 {
 			v.picker = nil
 			return m, nil
@@ -568,7 +573,7 @@ func (m model) pickerView() string {
 		body = append(body, fitWidth(summary, width))
 	}
 	body = append(body, "", sty("16", th.addBar, true, false).Render(" enter ")+" "+sty(th.text, "", false, false).Render("Save")+"    "+
-		sty(th.text, th.chipBg, false, false).Render(" esc ")+" "+muted.Render("Cancel")+"    "+muted.Render("space toggle · ↑↓ move · type to filter"))
+		sty(th.text, th.chipBg, false, false).Render(" esc ")+" "+muted.Render("Cancel")+"    "+muted.Render("space pick many · ↑↓ move · type to filter"))
 	frame := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(th.threadBorder)).Padding(1, 3).Width(width + 6)
 	return frame.Render(strings.Join(body, "\n"))
 }

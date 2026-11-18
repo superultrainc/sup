@@ -122,7 +122,7 @@ Terminals don't pass `Cmd` to TUI apps, so to use `Cmd+K` map it to `ctrl+k` in 
 | `s` | Cycle layout: auto → split → unified |
 | `w` | Toggle line wrapping |
 | `x` | Collapse / expand the current file |
-| `r` | Request or remove reviewers (type to filter, `space` toggles, `enter` saves) |
+| `r` | Request or remove reviewers (type to filter, `enter` requests the highlighted person, or `space` toggles several and `enter` saves them) |
 | `m` | Merge (`↑`/`↓` method, `b` delete branch, `a` auto-merge, `!` admin bypass when allowed) |
 | `d` | Jump to Files changed |
 | `R` | Reload |

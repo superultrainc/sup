@@ -34,9 +34,13 @@ type prReview struct {
 	Body        string    `json:"body"`
 	BodyHTML    string    `json:"bodyHTML"`
 	SubmittedAt time.Time `json:"submittedAt"`
+	Commit      struct {
+		Oid string `json:"oid"`
+	} `json:"commit"` // the head this review was left on
 }
 
 type reviewThread struct {
+	ID           string `json:"id"`
 	Path         string `json:"path"`
 	Line         *int   `json:"line"`
 	StartLine    *int   `json:"startLine"`
@@ -62,6 +66,7 @@ type checkContext struct {
 	Status     string `json:"status"`     // CheckRun
 	Context    string `json:"context"`    // StatusContext
 	State      string `json:"state"`      // StatusContext
+	IsRequired bool   `json:"isRequired"` // required by the base branch's protection
 	CheckSuite *struct {
 		WorkflowRun *struct {
 			Workflow struct {
@@ -234,13 +239,13 @@ const prDetailQuery = `{
 			files(first: 100) { nodes { path additions deletions } }
 			commits(last: 1) { totalCount nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
 				__typename
-				... on CheckRun { name conclusion status checkSuite { workflowRun { workflow { name } } } }
-				... on StatusContext { context state }
+				... on CheckRun { name conclusion status isRequired(pullRequestNumber: %[3]d) checkSuite { workflowRun { workflow { name } } } }
+				... on StatusContext { context state isRequired(pullRequestNumber: %[3]d) }
 			} } } } } }
 			comments(first: 100) { nodes { author { login } body bodyHTML createdAt } }
-			reviews(first: 100) { nodes { author { login } state body bodyHTML submittedAt } }
+			reviews(first: 100) { nodes { author { login } state body bodyHTML submittedAt commit { oid } } }
 			reviewThreads(first: 100) { nodes {
-				path line startLine originalLine diffSide isResolved isOutdated
+				id path line startLine originalLine diffSide isResolved isOutdated
 				comments(first: 50) { nodes { author { login } body bodyHTML createdAt diffHunk } }
 			} }
 		}

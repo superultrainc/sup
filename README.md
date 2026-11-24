@@ -136,6 +136,12 @@ Images in descriptions and comments render inline. Terminals with the kitty grap
 
 PRs open instantly once cached. In the background, sup warms every listed PR (nearest the cursor first), keeps a disk cache in `~/.cache/sup/prs`, and refreshes what's open. A PR is only refetched when its `updatedAt` changes, and its diff only when the head commit does.
 
+## Scripting
+
+Subcommands drive the PR workflow without the UI, for scripts and agents. `<ref>` is anything `sup` accepts to open a PR (`42`, `web 42`, `acme/web#42`, a URL). A subcommand name wins over a repo of the same name, so use `acme/list#3` for a repo called `list`.
+
+Exit codes: `0` done, `1` GitHub or network error, `2` bad usage, `3` refused by a guard, `4` timed out.
+
 ## Configuration (optional)
 
 | Variable | Description | Default |

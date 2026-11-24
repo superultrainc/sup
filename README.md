@@ -142,6 +142,26 @@ Subcommands drive the PR workflow without the UI, for scripts and agents. `<ref>
 
 Exit codes: `0` done, `1` GitHub or network error, `2` bad usage, `3` refused by a guard, `4` timed out.
 
+### `sup pr <ref> --json`
+
+Prints the PR as JSON. Fields are only ever added, never renamed or removed.
+
+```json
+{
+  "repo": "acme/web", "number": 42, "id": "PR_kwDO…", "url": "…", "title": "…",
+  "state": "OPEN", "isDraft": false, "author": "neil",
+  "baseRefName": "main", "headRefName": "fix/x", "headRefOid": "89ab8dc…",
+  "additions": 7, "deletions": 6, "changedFiles": 3,
+  "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewDecision": "APPROVED",
+  "checksState": "SUCCESS",
+  "checks": [{ "name": "CI / test", "result": "SUCCESS", "isRequired": true }],
+  "reviews": [{ "author": "greptile-apps", "state": "APPROVED", "commitOid": "89ab8dc…", "submittedAt": "…", "body": "…" }],
+  "reviewThreads": [{ "id": "PRRT_…", "path": "main.go", "line": 12, "author": "greptile-apps", "isResolved": false, "isOutdated": false, "comments": 2 }]
+}
+```
+
+`checks` are on the head commit. `reviews` are oldest first, and `commitOid` is the head each one was left on. Bot logins come without `[bot]` (`greptile-apps`). A thread's `author` started it, and `line` is null once the thread is outdated.
+
 ## Configuration (optional)
 
 | Variable | Description | Default |

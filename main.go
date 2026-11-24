@@ -2273,6 +2273,9 @@ func stripAnsi(s string) string {
 }
 
 func main() {
+	if code, ok := runCLI(os.Args[1:]); ok {
+		os.Exit(code)
+	}
 	var prArgs []string
 	for i, arg := range os.Args[1:] {
 		switch arg {

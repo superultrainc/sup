@@ -142,6 +142,23 @@ Subcommands drive the PR workflow without the UI, for scripts and agents. `<ref>
 
 Exit codes: `0` done, `1` GitHub or network error, `2` bad usage, `3` refused by a guard, `4` timed out.
 
+### `sup list --json`
+
+Prints the open PRs the list shows, drafts last then most recently updated, as a JSON array. It always fetches fresh from GitHub and fails (exit `1`) rather than print a partial list.
+
+| Flag | Lists |
+|------|-------|
+| `--mine` | PRs you're involved in, like `sup --mine` |
+| `--repo owner/repo` | one repo's PRs (with `--mine`, the ones you're involved in) |
+| `--head-prefix X` | only PRs whose branch starts with `X` |
+
+```json
+[{ "repo": "acme/web", "number": 42, "url": "…", "title": "…", "author": "neil",
+   "headRefName": "fix/x", "headRefOid": "89ab8dc…", "isDraft": false, "additions": 7, "deletions": 6,
+   "reviewDecision": "APPROVED", "requestedReviewers": ["max"], "isInMergeQueue": false, "autoMerge": false,
+   "updatedAt": "…" }]
+```
+
 ## Configuration (optional)
 
 | Variable | Description | Default |

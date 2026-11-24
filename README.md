@@ -96,6 +96,7 @@ Repo, author/reviewer, status, and free text combine — each one narrows the li
 | `A` | Approve PR (with `y`/`n` confirm) |
 | `D` | Request changes — write the body in a modal (`@` completes people, `ctrl+s` sends) |
 | `M` | Comment on PR — same modal as `D` |
+| `U` | Update the PR's branch with its base branch |
 | `W` | Convert PR to a draft, or mark a draft ready for review (with `y`/`n` confirm) |
 | `X` | Close PR (with `y`/`n` confirm) |
 | `?` | Toggle full help overlay |
@@ -128,7 +129,7 @@ Terminals don't pass `Cmd` to TUI apps, so to use `Cmd+K` map it to `ctrl+k` in 
 | `R` | Reload |
 | `esc` | Back to the list |
 
-`A`, `D`, `M`, `W`, `X`, `o`, and `c` work from here too.
+`A`, `D`, `M`, `U`, `W`, `X`, `o`, and `c` work from here too.
 
 The mouse works too: click a tab to switch, click a file in the tree to jump to it, and scroll with the wheel. In the list, click a PR to select it and click it again to open it. Hold Option (or Shift, depending on your terminal) to select text.
 
@@ -141,6 +142,10 @@ PRs open instantly once cached. In the background, sup warms every listed PR (ne
 Subcommands drive the PR workflow without the UI, for scripts and agents. `<ref>` is anything `sup` accepts to open a PR (`42`, `web 42`, `acme/web#42`, a URL). A subcommand name wins over a repo of the same name, so use `acme/list#3` for a repo called `list`.
 
 Exit codes: `0` done, `1` GitHub or network error, `2` bad usage, `3` refused by a guard, `4` timed out.
+
+### `sup update-branch <ref>`
+
+Merges the base branch into the PR's branch, like GitHub's "Update branch" button. It sends the head it just read as `expected_head_sha`, so GitHub refuses if someone pushed in between. GitHub finishes the update asynchronously.
 
 ## Configuration (optional)
 

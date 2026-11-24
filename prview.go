@@ -701,7 +701,7 @@ func (m model) handleDetailInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v.tab = tabFiles
 	case "i":
 		return m.openGallery()
-	case "A", "D", "M", "o", "c", "W", "X":
+	case "A", "D", "M", "o", "c", "U", "W", "X":
 		return m.handleNormalInput(msg)
 	}
 	v.clampScroll(m.height)

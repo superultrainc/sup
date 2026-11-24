@@ -306,6 +306,30 @@ func mergeAsync(pr PR, md mergeDialog, body map[string]string) (queued bool, err
 	return false, err
 }
 
+type branchUpdatedMsg struct {
+	pr  PR
+	err error
+}
+
+// updateBranch merges the base into the PR's branch. head makes GitHub refuse if the branch moved since it was read.
+func updateBranch(pr PR, head string) error {
+	body := map[string]string{}
+	if head != "" {
+		body["expected_head_sha"] = head
+	}
+	_, err := githubREST("PUT", fmt.Sprintf("%s/pulls/%d/update-branch", repoPath(pr), pr.Number), body)
+	return err
+}
+
+func updateBranchCmd(pr PR) tea.Cmd {
+	return func() tea.Msg {
+		if demoMode {
+			return branchUpdatedMsg{pr: pr}
+		}
+		return branchUpdatedMsg{pr, updateBranch(pr, pr.HeadRefOid)}
+	}
+}
+
 type branchDeletedMsg struct{ err error }
 
 // deleteBranchCmd deletes a merged PR's head branch; a 422 means the repo already did.

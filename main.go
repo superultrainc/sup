@@ -855,6 +855,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case mergeDoneMsg:
 		return m, m.handleMergeDone(msg)
 
+	case branchUpdatedMsg:
+		m.actionStatus = fmt.Sprintf("✓ Updating #%d with its base branch", msg.pr.Number)
+		if msg.err != nil {
+			m.actionStatus = fmt.Sprintf("Error on #%d: %v", msg.pr.Number, msg.err)
+		}
+		return m, nil
+
 	case branchDeletedMsg:
 		if msg.err != nil {
 			m.actionStatus = "Error: " + msg.err.Error()
@@ -1477,6 +1484,15 @@ func (m model) handleNormalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "U":
+		if pr, ok := m.currentPR(); ok {
+			if e := m.cache[prKey(pr)]; e != nil && e.detail != nil {
+				pr.HeadRefOid = e.detail.HeadRefOid // newer than the row's when the PR view is open
+			}
+			return m, updateBranchCmd(pr)
+		}
+		return m, nil
+
 	case "W":
 		if pr, ok := m.currentPR(); ok {
 			m.confirmAction = "draft"
@@ -1743,6 +1759,7 @@ func (m model) helpSections() []helpSection {
 			{"o", "Open in browser"},
 			{"O", "Open all needing review"},
 			{"c", "Copy PR link"},
+			{"U", "Update branch with base"},
 			{"W", "Convert to draft / mark ready"},
 			{"X", "Close PR"},
 		}},
@@ -1782,6 +1799,7 @@ func (m model) helpSections() []helpSection {
 				{"M", "Comment"},
 				{"o", "Open in browser"},
 				{"c", "Copy PR link"},
+				{"U", "Update branch with base"},
 				{"W", "Convert to draft / mark ready"},
 				{"X", "Close PR"},
 				{"R", "Refresh PR"},

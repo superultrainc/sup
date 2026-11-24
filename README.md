@@ -142,6 +142,21 @@ Subcommands drive the PR workflow without the UI, for scripts and agents. `<ref>
 
 Exit codes: `0` done, `1` GitHub or network error, `2` bad usage, `3` refused by a guard, `4` timed out.
 
+### `sup merge <ref> --squash|--merge|--rebase`
+
+Merges like the `m` dialog: pinned to the head sup just read, so nothing pushed after that merges, then deletes the branch (never a fork's). Merge-queue repos queue it instead. It refuses (exit `3`) when the PR is closed, a draft, the method isn't allowed, or a required check on the head isn't passing, plus:
+
+| Flag | Refuses unless |
+|------|----------------|
+| `--require-approval <login>` | `<login>`'s latest approval, change request or dismissal is an approval of the current head (`greptile-apps` and `greptile-apps[bot]` both work) |
+| `--max-lines N` | additions + deletions ≤ N |
+| `--max-files N` | changed files ≤ N |
+| `--match-head <sha>` | the head is `<sha>` (7+ characters) |
+
+```bash
+sup merge acme/web#42 --squash --require-approval greptile-apps --max-lines 300 --max-files 10 --match-head 89ab8dc
+```
+
 ## Configuration (optional)
 
 | Variable | Description | Default |

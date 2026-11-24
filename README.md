@@ -142,6 +142,10 @@ Subcommands drive the PR workflow without the UI, for scripts and agents. `<ref>
 
 Exit codes: `0` done, `1` GitHub or network error, `2` bad usage, `3` refused by a guard, `4` timed out.
 
+### `sup resolve <ref> --author <login> | --all`
+
+Resolves the PR's unresolved review threads: only those `<login>` started with `--author` (`greptile-apps` and `greptile-apps[bot]` both work), or every one with `--all`. One of the two is required. Prints each thread it resolves.
+
 ## Configuration (optional)
 
 | Variable | Description | Default |

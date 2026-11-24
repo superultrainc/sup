@@ -74,7 +74,7 @@ func newPRJSON(pr PR, d *prDetail) prJSON {
 		}
 	}
 	for _, r := range d.Reviews.Nodes {
-		out.Reviews = append(out.Reviews, prJSONReview{r.Author.Login, r.State, r.Commit.Oid, r.SubmittedAt, r.Body})
+		out.Reviews = append(out.Reviews, prJSONReview{r.Author.Login, r.State, r.Commit.Oid, r.SubmittedAt, cleanBody(r.Body)})
 	}
 	for _, t := range d.ReviewThreads.Nodes {
 		jt := prJSONThread{ID: t.ID, Path: t.Path, Line: t.Line, IsResolved: t.IsResolved, IsOutdated: t.IsOutdated, Comments: len(t.Comments.Nodes)}
